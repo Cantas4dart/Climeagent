@@ -59,6 +59,16 @@ const DASHBOARD_POSITIONS_LIMIT = 6;
 const DASHBOARD_ORDERS_LIMIT = 6;
 const CLAIMABLE_BUTTON_LIMIT = 5;
 
+function hasImportedWallet(user?: any): boolean {
+  return !!(
+    user &&
+    typeof user.private_key === "string" && user.private_key.trim() &&
+    typeof user.api_key === "string" && user.api_key.trim() &&
+    typeof user.api_secret === "string" && user.api_secret.trim() &&
+    typeof user.api_passphrase === "string" && user.api_passphrase.trim()
+  );
+}
+
 function truncateMiddle(value: string, start = 8, end = 6): string {
   if (!value || value.length <= start + end + 3) return value;
   return `${value.slice(0, start)}...${value.slice(-end)}`;
@@ -76,104 +86,132 @@ function formatOrderSummary(order: any): string {
   const size = order.original_size || order.size || "?";
   const price = order.price ?? "?";
   const status = order.status || "open";
-  return `• ${label}: ${order.side} ${size} @ ${price} (${status})`;
+  return `\u{1F4CB} ${label}: ${order.side} ${size} @ ${price} (${status})`;
+}
+
+function formatRealTradeHistory(trade: any): string {
+  const result = trade.settled ? (trade.outcome === 1 ? "WIN" : "LOSS") : "OPEN";
+  const pnl = trade.settled ? ` | PnL ${Number(trade.pnl || 0).toFixed(2)} pUSD` : "";
+  return `\u{1F4DC} #${trade.id} ${trade.side} ${trade.market_id} | ${result}${pnl}`;
+}
+
+function formatPaperTradeHistory(trade: any): string {
+  const result = trade.settled ? (trade.outcome === 1 ? "WIN" : "LOSS") : "OPEN";
+  const pnl = trade.settled ? ` | PnL ${Number(trade.pnl || 0).toFixed(4)} pUSD` : "";
+  return `\u{1F4DC} #${trade.id} ${trade.side} ${trade.market_id} | ${result}${pnl}`;
 }
 
 function buildPositionsKeyboard(autoClaim: boolean, hasClaimables: boolean) {
   const keyboard = new InlineKeyboard()
-    .text("🏠 Home", "positions:main")
-    .text("🔄 Refresh", "positions:refresh")
+    .text("\u{1F3E0} Home", "positions:main")
+    .text("\u{1F504} Refresh", "positions:refresh")
     .row()
-    .text("📋 Claimable", "positions:claimable")
-    .text("🛠 Setup", "positions:setup")
+    .text("\u{1F4B0} Claimable", "positions:claimable")
+    .text("\u{1F6E0}\uFE0F Setup", "positions:setup")
     .row()
-    .text("💰 Balance", "positions:balance")
-    .text("📊 Status", "positions:status")
+    .text("\u{1F4E6} Orders", "positions:orders")
+    .text("\u{1F4D1} History", "positions:history")
     .row()
-    .text("📈 Stats", "positions:stats")
-    .text("🗓 Daily", "positions:daily")
+    .text("\u{1F4B5} Balance", "positions:balance")
+    .text("\u{1F4CA} Status", "positions:status")
     .row()
-    .text("⚙️ Controls", "positions:controls")
-    .text("❓ Help", "positions:help");
+    .text("\u{1F4C8} Stats", "positions:stats")
+    .text("\u{1F4C5} Daily", "positions:daily")
+    .row()
+    .text("\u2699\ufe0f Controls", "positions:controls")
+    .text("\u2753 Help", "positions:help");
 
   keyboard.row();
 
   keyboard
-    .text("💸 Claim All", hasClaimables ? "positions:claim_all" : "positions:claimable")
-    .text(autoClaim ? "🛑 Auto-Claim Off" : "✅ Auto-Claim On", autoClaim ? "positions:auto_claim_off" : "positions:auto_claim_on");
+    .text("\u{1F4B0} Claim All", hasClaimables ? "positions:claim_all" : "positions:claimable")
+    .text(autoClaim ? "\u{1F6D1} Auto-Claim Off" : "\u2705 Auto-Claim On", autoClaim ? "positions:auto_claim_off" : "positions:auto_claim_on");
 
   return keyboard;
 }
 
 function buildOnboardingKeyboard() {
   return new InlineKeyboard()
-    .text("🔐 Import Wallet", "positions:import_start")
-    .text("🛠 Setup", "positions:setup")
+    .text("\u{1F4BC} Real Trade", "positions:real_trade")
+    .text("\u{1F9EA} Paper Trade", "positions:paper_trade")
     .row()
-    .text("❓ Help", "positions:help")
-    .text("🏠 Home", "positions:main")
-    .row();
+    .text("\u{1F6E0}\uFE0F Setup", "positions:setup")
+    .text("\u2753 Help", "positions:help")
+    .row()
+    .text("\u{1F3E0} Home", "positions:welcome");
 }
 
+
 function buildSetupMessage(user?: any) {
-  if (!user) {
-    return [
-      "*Setup Center*",
+  if (!user || !hasImportedWallet(user)) {
+    return wrapCodeBlock([
+      "Setup Center",
       "",
-      "Import your wallet first to unlock approvals, wallet checks, funding, and risk controls.",
+      user
+        ? "No wallet is currently attached. Choose Real Trade to import one, or use Paper Trade without a live wallet."
+        : "Import your wallet first to unlock approvals, wallet checks, funding, and risk controls.",
       "",
-      "*Available After Import*",
-      "Approve trading allowance",
-      "Check signer, funder, and proxy linkage",
-      "Move USDC.e into the trading wallet",
-      "Tune risk, max size, and max open positions",
-    ].join("\n");
+      "Available After Import",
+      formatKeyValue("Approve", "trading allowance"),
+      formatKeyValue("Check", "signer, funder, proxy"),
+      formatKeyValue("Move", "pUSD into the trading wallet"),
+      formatKeyValue("Tune", "risk, max size, max open"),
+      "",
+      "Testing",
+      formatKeyValue("Paper Signal", user?.paper_testing_active ? "ON" : "OFF"),
+    ]);
   }
 
   const accountConfig = resolveUserPolymarketAccountConfig(user);
-  return [
-    "*Setup Center*",
+  return wrapCodeBlock([
+    "Setup Center",
     "",
-    "*Wallet*",
-    `Funder: \`${accountConfig.funderAddress || "wallet address"}\``,
-    `Signature Type: ${accountConfig.signatureType ?? "default(EOA)"}`,
+    "Wallet",
+    formatKeyValue("Funder", accountConfig.funderAddress || "wallet address"),
+    formatKeyValue("Signature Type", accountConfig.signatureType ?? "default(EOA)"),
     "",
-    "*Ready Actions*",
-    "Import: replace wallet credentials",
-    "Approve: refresh Polymarket trading allowance",
-    "Wallet Check: verify signer and proxy linkage",
-    "Fund Wallet: move USDC.e into the trading wallet",
-    "Risk Settings: update trade limits and exposure",
-  ].join("\n");
+    "Ready Actions",
+    formatKeyValue("Import", "replace wallet credentials"),
+    formatKeyValue("Approve", "refresh trading allowance"),
+    formatKeyValue("Wallet Check", "verify signer and proxy"),
+    formatKeyValue("Fund Wallet", "move pUSD into the trading wallet"),
+    formatKeyValue("Risk Settings", "update trade limits and exposure"),
+    formatKeyValue("Remove Wallet", "wipe live credentials"),
+    "",
+    "Testing",
+    formatKeyValue("Paper Signal", user.paper_testing_active ? "ON" : "OFF"),
+  ]);
 }
 
 function buildControlsMessage(user: any) {
-  return [
-    "*Controls Center*",
+  return wrapCodeBlock([
+    "Controls Center",
     "",
-    "*Trading*",
-    `Status: ${user.trading_active ? "Active" : "Stopped"}`,
-    `Auto-Claim: ${user.auto_claim ? "ON" : "OFF"}`,
+    "Trading",
+    formatKeyValue("Status", user.trading_active ? "Active" : "Stopped"),
+    formatKeyValue("Auto-Claim", user.auto_claim ? "ON" : "OFF"),
+    formatKeyValue("Paper Testing", user.paper_testing_active ? "ON" : "OFF"),
     "",
-    "*Exposure*",
-    `Risk: ${user.risk_percent}%`,
-    `Max Trade: $${user.max_trade_amount}`,
-    `Max Open: ${user.max_open_positions}`,
+    "Exposure",
+    formatKeyValue("Risk", `${user.risk_percent}%`),
+    formatKeyValue("Max Trade", `$${user.max_trade_amount}`),
+    formatKeyValue("Max Open", user.max_open_positions),
     "",
     "Use the buttons below to start or stop trading, toggle auto-claim, or open risk settings.",
-  ].join("\n");
+  ]);
 }
 
 function buildRiskSettingsMessage(user: any) {
-  return [
-    "*Risk Settings*",
+  return wrapCodeBlock([
+    "Risk Settings",
     "",
-    `Risk Per Trade: ${user.risk_percent}%`,
-    `Max Trade Amount: $${user.max_trade_amount}`,
-    `Max Open Positions: ${user.max_open_positions}`,
+    formatKeyValue("Risk Per Trade", `${user.risk_percent}%`),
+    formatKeyValue("Max Trade Amount", `$${user.max_trade_amount}`),
+    formatKeyValue("Max Open Positions", user.max_open_positions),
+    formatKeyValue("Paper Testing", user.paper_testing_active ? "ON" : "OFF"),
     "",
     "Choose a setting below and then send the new value in chat.",
-  ].join("\n");
+  ]);
 }
 
 async function buildWalletCheckMessage(user: any) {
@@ -189,31 +227,47 @@ async function buildWalletCheckMessage(user: any) {
   const profile = await poly.getPublicProfileByWallet(funderAddress);
   const proxyWallet = profile?.proxyWallet || null;
 
-  return [
-    "*Wallet Check*",
+  return wrapCodeBlock([
+    "Wallet Check",
     "",
-    `Signer: \`${signerAddress}\``,
-    `Configured Funder: \`${funderAddress}\``,
-    `Profile Proxy Wallet: \`${proxyWallet || "not found"}\``,
-    `Signature Type: ${accountConfig.signatureType ?? "default(EOA)"}`,
+    formatKeyValue("Signer", signerAddress),
+    formatKeyValue("Configured Funder", funderAddress),
+    formatKeyValue("Profile Proxy", proxyWallet || "not found"),
+    formatKeyValue("Signature Type", accountConfig.signatureType ?? "default(EOA)"),
     "",
     proxyWallet && proxyWallet.toLowerCase() === funderAddress.toLowerCase()
-      ? "_Funder matches Polymarket profile proxy wallet._"
-      : "_Funder does not match the Polymarket profile proxy wallet, or no profile was found._",
-  ].join("\n");
+      ? "Funder matches Polymarket profile proxy wallet."
+      : "Funder does not match the Polymarket profile proxy wallet, or no profile was found.",
+  ]);
 }
 
 function buildWelcomeDashboard() {
-  return [
-    "*Blocky Home*",
+  return wrapCodeBlock([
+    "Blocky Welcome",
     "",
-    "This is your control dashboard for setup, positions, claims, balances, and reports.",
+    "Pick the mode you want to use first.",
     "",
-    "*First Step*",
-    "Import a wallet to unlock trading actions.",
+    "Real Trade",
+    "Import your wallet, approve spending, fund the trading wallet, and manage live positions.",
     "",
-    "Then use Setup Center to approve, verify wallets, fund the trading wallet, and tune risk.",
-  ].join("\n");
+    "Paper Trade",
+    "Turn on paper testing and let the bot score signals without placing live orders.",
+  ]);
+}
+
+function escapeHtml(text: string): string {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function wrapCodeBlock(lines: string[]): string {
+  return lines.join("\n");
+}
+
+function formatKeyValue(label: string, value: any, width = 17): string {
+  return `${label.padEnd(width, " ")} ${value}`;
 }
 
 function buildDetailKeyboard(autoClaim: boolean, hasClaimables: boolean, page: string) {
@@ -244,20 +298,21 @@ function buildDetailKeyboard(autoClaim: boolean, hasClaimables: boolean, page: s
   return keyboard;
 }
 
-function buildSetupKeyboard(hasUser: boolean) {
+function buildSetupKeyboard(hasUser: boolean, hasWallet: boolean) {
   const keyboard = new InlineKeyboard()
     .text("🏠 Home", "positions:main")
     .text("🔄 Refresh", "positions:setup")
     .row()
     .text("🔐 Import Wallet", "positions:import_start")
-    .text("✅ Approve", hasUser ? "positions:approve" : "positions:import_start")
+    .text("✅ Approve", hasWallet ? "positions:approve" : "positions:import_start")
     .row()
-    .text("🔎 Wallet Check", hasUser ? "positions:wallet_check" : "positions:import_start")
-    .text("💸 Fund Wallet", hasUser ? "positions:fund_prompt" : "positions:import_start")
+    .text("🔎 Wallet Check", hasWallet ? "positions:wallet_check" : "positions:import_start")
+    .text("💸 Fund Wallet", hasWallet ? "positions:fund_prompt" : "positions:import_start")
     .row()
-    .text("🎯 Risk Settings", hasUser ? "positions:risk_settings" : "positions:import_start")
+    .text("🎯 Risk Settings", hasUser ? "positions:risk_settings" : "positions:help")
     .text("⚙️ Controls", hasUser ? "positions:controls" : "positions:help")
     .row()
+    .text(hasWallet ? "🗑 Remove Wallet" : "🔐 Import Wallet", hasWallet ? "positions:remove_wallet" : "positions:import_start")
     .text("❓ Help", "positions:help");
 
   return keyboard;
@@ -283,10 +338,12 @@ function buildControlsKeyboard(user: any) {
     .text(user?.trading_active ? "⏸ Stop Trading" : "▶️ Start Trading", user?.trading_active ? "positions:stop_trading" : "positions:start_trading")
     .text(user?.auto_claim ? "🛑 Auto-Claim Off" : "✅ Auto-Claim On", user?.auto_claim ? "positions:auto_claim_off" : "positions:auto_claim_on")
     .row()
+    .text(user?.paper_testing_active ? "🧪 Paper Testing Off" : "🧪 Paper Testing On", user?.paper_testing_active ? "positions:paper_testing_off" : "positions:paper_testing_on")
     .text("🎯 Risk Settings", "positions:risk_settings")
-    .text("🛠 Setup", "positions:setup")
     .row()
+    .text("🛠 Setup", "positions:setup")
     .text("📊 Status", "positions:status")
+    .row()
     .text("❓ Help", "positions:help");
 }
 
@@ -329,81 +386,133 @@ async function buildBalanceMessage(user: any) {
   const allowanceNum = extractAllowance(balanceData);
   const signerAddress = poly.getSignerAddress();
   const funderAddress = poly.getConfiguredFunderAddress();
-  const signerWalletUsdc = await poly.getWalletUsdcBalance(signerAddress);
-  const funderWalletUsdc = signerAddress.toLowerCase() === funderAddress.toLowerCase()
-    ? signerWalletUsdc
-    : await poly.getWalletUsdcBalance(funderAddress);
+  const signerWalletPusd = await poly.getWalletPusdBalance(signerAddress);
+  const funderWalletPusd = signerAddress.toLowerCase() === funderAddress.toLowerCase()
+    ? signerWalletPusd
+    : await poly.getWalletPusdBalance(funderAddress);
 
   const formattedBalance = isNaN(balanceNum) ? "0.00" : (balanceNum / 1000000).toFixed(2);
   const formattedAllowance = isNaN(allowanceNum) ? "0.00" : (allowanceNum / 1000000).toFixed(2);
-  const signerWalletUsdcText = (Number(signerWalletUsdc) / 1_000_000).toFixed(2);
-  const funderWalletUsdcText = (Number(funderWalletUsdc) / 1_000_000).toFixed(2);
+  const signerWalletPusdText = (Number(signerWalletPusd) / 1_000_000).toFixed(2);
+  const funderWalletPusdText = (Number(funderWalletPusd) / 1_000_000).toFixed(2);
 
-  return [
-    "*USDC Status*",
+  return wrapCodeBlock([
+    "pUSD Status",
     "",
-    `Trading Balance: ${formattedBalance} USDC`,
-    `Trading Allowance: ${formattedAllowance} USDC`,
-    `Signature Type: ${accountConfig.signatureType ?? "default(EOA)"}`,
-    `Signer: \`${signerAddress}\``,
-    `Signer Wallet USDC.e: ${signerWalletUsdcText} USDC`,
-    `Funder: \`${funderAddress}\``,
-    `Funder Wallet USDC.e: ${funderWalletUsdcText} USDC`,
+    formatKeyValue("Trading Balance", `${formattedBalance} pUSD`),
+    formatKeyValue("Trading Allowance", `${formattedAllowance} pUSD`),
+    formatKeyValue("Signature Type", accountConfig.signatureType ?? "default(EOA)"),
+    formatKeyValue("Signer", signerAddress),
+    formatKeyValue("Signer Wallet pUSD", `${signerWalletPusdText} pUSD`),
+    formatKeyValue("Funder", funderAddress),
+    formatKeyValue("Funder Wallet pUSD", `${funderWalletPusdText} pUSD`),
     "",
-    "_Note: If balance is wrong, ensure you have USDC.e (Bridged USDC)._",
-  ].join("\n");
+    "Note: If balance is wrong, ensure your wallet holds pUSD on Polygon.",
+  ]);
 }
 
 function buildStatusMessage(user: any) {
-  return [
-    "*Bot Status*",
+  const accountConfig = resolveUserPolymarketAccountConfig(user);
+  return wrapCodeBlock([
+    "Bot Status",
     "",
-    "*Controls*",
-    `Trading: ${user.trading_active ? "Active" : "Stopped"}`,
-    `Auto-Claim: ${user.auto_claim ? "ON" : "OFF"}`,
+    "Controls",
+    formatKeyValue("Trading", user.trading_active ? "Active" : "Stopped"),
+    formatKeyValue("Auto-Claim", user.auto_claim ? "ON" : "OFF"),
     "",
-    "*Risk Profile*",
-    `Risk: ${user.risk_percent}%`,
-    `Max Trade: $${user.max_trade_amount}`,
-    `Max Open Positions: ${user.max_open_positions}`,
+    "Risk Profile",
+    formatKeyValue("Risk", `${user.risk_percent}%`),
+    formatKeyValue("Max Trade", `$${user.max_trade_amount}`),
+    formatKeyValue("Max Open Positions", user.max_open_positions),
     "",
-    "*Account*",
-    `Signature Type: ${resolveUserPolymarketAccountConfig(user).signatureType ?? "default(EOA)"}`,
-    `Funder: \`${resolveUserPolymarketAccountConfig(user).funderAddress || "wallet address"}\``,
-  ].join("\n");
+    "Account",
+    formatKeyValue("Signature Type", accountConfig.signatureType ?? "default(EOA)"),
+    formatKeyValue("Funder", accountConfig.funderAddress || "wallet address"),
+  ]);
 }
 
-function buildStatsMessage(overall: any) {
+function buildStatsMessage(overall: any, paperStats?: any) {
+  const lines = [
+    "Overall Performance",
+    "",
+    formatKeyValue("Total Trades", overall.total),
+    formatKeyValue("Settled", overall.settled),
+    formatKeyValue("Win Rate", `${overall.winRate}%`),
+    formatKeyValue("Total PnL", `${overall.pnl.toFixed(2)} pUSD`),
+  ];
+
+  if (paperStats) {
+    lines.push("", ...buildPaperStatsLines(paperStats));
+  }
+
+  return wrapCodeBlock(lines);
+}
+
+function buildPaperStatsLines(paperStats: any) {
+  const hitRateLabel = paperStats.settled > 0 ? `${paperStats.winRate}% hit rate` : "No settled paper tests yet";
   return [
-    "*Overall Performance*",
-    `Total Trades: ${overall.total}`,
-    `Settled: ${overall.settled}`,
-    `Win Rate: ${overall.winRate}%`,
-    `Total PnL: *${overall.pnl.toFixed(2)} USDC*`,
-  ].join("\n");
+    "Paper Test Lab",
+    formatKeyValue("Total Signals Tracked", paperStats.total),
+    formatKeyValue("Open Simulations", paperStats.open),
+    formatKeyValue("Settled Simulations", paperStats.settled),
+    formatKeyValue("Scoreline", `${paperStats.wins} win${paperStats.wins === 1 ? "" : "s"} / ${paperStats.losses} loss${paperStats.losses === 1 ? "" : "es"}`),
+    formatKeyValue("Paper Edge", hitRateLabel),
+    formatKeyValue("Paper PnL", `${paperStats.pnl.toFixed(3)} pUSD`),
+  ];
 }
 
 function buildDailyMessage(daily: any, overall: any) {
   const today = new Date().toISOString().split("T")[0];
   const dailyWinRate = daily.settled > 0 ? ((daily.wins / daily.settled) * 100).toFixed(1) : "N/A";
 
-  return [
-    `*Daily Report - ${today}*`,
+  return wrapCodeBlock([
+    `Daily Report - ${today}`,
     "",
-    "*Today:*",
-    `Trades: ${daily.total}`,
-    `Settled: ${daily.settled}`,
-    `Wins: ${daily.wins} (${dailyWinRate}%)`,
-    `PnL: *${daily.pnl.toFixed(2)} USDC*`,
+    "Today",
+    formatKeyValue("Trades", daily.total),
+    formatKeyValue("Settled", daily.settled),
+    formatKeyValue("Wins", `${daily.wins} (${dailyWinRate}%)`),
+    formatKeyValue("PnL", `${daily.pnl.toFixed(2)} pUSD`),
     "",
-    "*All Time:*",
-    `Total Trades: ${overall.total}`,
-    `Win Rate: ${overall.winRate}%`,
-    `Cumulative PnL: *${overall.pnl.toFixed(2)} USDC*`,
-  ].join("\n");
+    "All Time",
+    formatKeyValue("Total Trades", overall.total),
+    formatKeyValue("Win Rate", `${overall.winRate}%`),
+    formatKeyValue("Cumulative PnL", `${overall.pnl.toFixed(2)} pUSD`),
+  ]);
 }
 
 async function buildPositionsDashboard(userId: string, user: any) {
+  const trackedOpenPositions = db.getUnsettledTradeCount(userId);
+  const claimableTrades = db.getClaimableTrades(userId);
+  const paperStats = db.getPaperStats(userId);
+
+  if (!hasImportedWallet(user)) {
+    const lines = [
+      "\u{1F3AF} Position Center",
+      "",
+      "Overview",
+      formatKeyValue("Open Positions", trackedOpenPositions),
+      formatKeyValue("Working Orders", 0),
+      formatKeyValue("Claimable", claimableTrades.length),
+      formatKeyValue("Auto-Claim", user.auto_claim ? "ON" : "OFF"),
+      formatKeyValue("Paper Testing", user.paper_testing_active ? "ON" : "OFF"),
+      "",
+      "Wallet",
+      formatKeyValue("Live Wallet", "not attached"),
+      "",
+      ...buildPaperStatsLines(paperStats).map((line) => line.replace(/\*/g, "")),
+    ];
+
+    if (trackedOpenPositions === 0) {
+      lines.push("", "Activity", "No open positions or working orders right now.");
+    }
+
+    return {
+      text: wrapCodeBlock(lines),
+      keyboard: buildPositionsKeyboard(!!user?.auto_claim, claimableTrades.length > 0),
+    };
+  }
+
   const accountConfig = resolveUserPolymarketAccountConfig(user);
   const poly = new PolyMarketAPI({
     key: user.api_key,
@@ -414,82 +523,131 @@ async function buildPositionsDashboard(userId: string, user: any) {
   const positionsAddress = accountConfig.funderAddress
     || privateKeyToAccount(user.private_key.startsWith("0x") ? user.private_key : `0x${user.private_key}`).address;
 
-  const [positions, openOrders] = await Promise.all([
+  const [, openOrders] = await Promise.all([
     poly.getPositions(positionsAddress),
     poly.getOpenOrders(),
   ]);
-  const visiblePositions = (positions || []).filter((position: any) => {
-    const size = Number(position.size ?? position.balance ?? 0);
-    const currentValue = Number(position.currentValue ?? 0);
-    const curPrice = Number(position.curPrice ?? 0);
-    const redeemable = Boolean(position.redeemable);
-    return size > 0 && (currentValue > 0 || curPrice > 0 || redeemable);
-  });
-  const enrichedPositions = await Promise.all(visiblePositions.map(async (position: any) => {
-    const title = String(position.title || "").trim();
-    const outcome = String(position.outcome || "").trim().toUpperCase();
-    const displayLabel = title
-      ? `${title}${outcome ? ` [${outcome}]` : ""}`
-      : await poly.getPositionLabel(String(position.asset || ""));
-
-    return {
-      ...position,
-      displayLabel,
-    };
-  }));
-  const claimableTrades = db.getClaimableTrades(userId);
-  const preferredOpen = enrichedPositions.filter((position: any) => {
-    const price = Number(position.avgPrice ?? position.averagePrice ?? 0);
-    return Number.isFinite(price) && price >= 0.20 && price <= 0.70;
-  }).length;
-
   const lines = [
-    "*Position Center*",
+    "\u{1F3AF} Position Center",
     "",
-    "*Overview*",
-    `Open Positions: ${enrichedPositions.length || 0}`,
-    `Working Orders: ${openOrders?.length || 0}`,
-    `Claimable Markets: ${claimableTrades.length}`,
-    `Auto-Claim: ${user.auto_claim ? "ON" : "OFF"}`,
+    "Overview",
+    formatKeyValue("Open Positions", trackedOpenPositions),
+    formatKeyValue("Working Orders", openOrders?.length || 0),
+    formatKeyValue("Claimable", claimableTrades.length),
+    formatKeyValue("Auto-Claim", user.auto_claim ? "ON" : "OFF"),
+    formatKeyValue("Paper Testing", user.paper_testing_active ? "ON" : "OFF"),
     "",
-    "*Focus*",
-    `Preferred-Band Positions: ${preferredOpen}`,
-    `Dashboard Wallet: \`${truncateMiddle(positionsAddress, 10, 6)}\``,
+    "Live Wallet",
+    formatKeyValue("Dashboard Wallet", truncateMiddle(positionsAddress, 10, 6)),
+    "",
+    ...buildPaperStatsLines(paperStats).map((line) => line.replace(/\*/g, "")),
   ];
 
-  if (enrichedPositions.length > 0) {
-    lines.push("", "*Open Positions*");
-    enrichedPositions.slice(0, DASHBOARD_POSITIONS_LIMIT).forEach((position: any) => {
-      lines.push(formatPositionSummary(position));
-    });
-    if (enrichedPositions.length > DASHBOARD_POSITIONS_LIMIT) {
-      lines.push(`_Showing ${DASHBOARD_POSITIONS_LIMIT} of ${enrichedPositions.length} positions._`);
-    }
-  }
-
   if (openOrders && openOrders.length > 0) {
-    lines.push("", "*Working Orders*");
+    lines.push("", "Working Orders");
     openOrders.slice(0, DASHBOARD_ORDERS_LIMIT).forEach((order: any) => {
       lines.push(formatOrderSummary(order));
     });
     if (openOrders.length > DASHBOARD_ORDERS_LIMIT) {
-      lines.push(`_Showing ${DASHBOARD_ORDERS_LIMIT} of ${openOrders.length} orders._`);
+      lines.push(`Showing ${DASHBOARD_ORDERS_LIMIT} of ${openOrders.length} orders.`);
     }
   }
 
-  if (enrichedPositions.length === 0 && (!openOrders || openOrders.length === 0)) {
-    lines.push("", "*Activity*", "_No open positions or working orders right now._");
+  if (trackedOpenPositions === 0 && (!openOrders || openOrders.length === 0)) {
+    lines.push("", "Activity", "No open positions or working orders right now.");
   }
 
   return {
-    text: lines.join("\n"),
+    text: wrapCodeBlock(lines),
     keyboard: buildPositionsKeyboard(!!user.auto_claim, claimableTrades.length > 0),
   };
 }
 
+async function buildActiveOrdersPage(userId: string, user: any) {
+  if (!hasImportedWallet(user)) {
+    return {
+      text: wrapCodeBlock([
+        "Active Market Orders",
+        "",
+        "Import a live wallet first to view active orders.",
+      ]),
+      keyboard: buildPositionsKeyboard(!!user?.auto_claim, false),
+    };
+  }
+
+  const accountConfig = resolveUserPolymarketAccountConfig(user);
+  const poly = new PolyMarketAPI({
+    key: user.api_key,
+    secret: user.api_secret,
+    passphrase: user.api_passphrase
+  }, user.private_key, accountConfig);
+
+  const openOrders = await poly.getOpenOrders();
+  const lines = [
+    "Active Market Orders",
+    "",
+    formatKeyValue("Count", openOrders?.length || 0),
+  ];
+
+  if (openOrders && openOrders.length > 0) {
+    lines.push("");
+    openOrders.slice(0, DASHBOARD_ORDERS_LIMIT).forEach((order: any) => {
+      lines.push(formatOrderSummary(order));
+    });
+    if (openOrders.length > DASHBOARD_ORDERS_LIMIT) {
+      lines.push(`Showing ${DASHBOARD_ORDERS_LIMIT} of ${openOrders.length} orders.`);
+    }
+  } else {
+    lines.push("", "No active market orders right now.");
+  }
+
+  return {
+    text: wrapCodeBlock(lines),
+    keyboard: buildPositionsKeyboard(!!user?.auto_claim, false),
+  };
+}
+
+async function buildTradeHistoryPage(userId: string, user: any) {
+  const realAll = db.getTradesForUser(userId);
+  const paperAll = db.getPaperTradesForUser(userId);
+  const realTrades = realAll.slice(0, DASHBOARD_POSITIONS_LIMIT);
+  const paperTrades = paperAll.slice(0, DASHBOARD_POSITIONS_LIMIT);
+  const lines = [
+    "Trade History",
+    "",
+  ];
+
+  if (realTrades.length > 0) {
+    lines.push("Real Trades");
+    realTrades.forEach((trade: any) => lines.push(formatRealTradeHistory(trade)));
+    if (realAll.length > DASHBOARD_POSITIONS_LIMIT) {
+      lines.push(`Showing ${DASHBOARD_POSITIONS_LIMIT} of ${realAll.length} real trades.`);
+    }
+    lines.push("");
+  } else {
+    lines.push("Real Trades", "No real trades yet.", "");
+  }
+
+  if (paperTrades.length > 0) {
+    lines.push("Paper Trades");
+    paperTrades.forEach((trade: any) => lines.push(formatPaperTradeHistory(trade)));
+    if (paperAll.length > DASHBOARD_POSITIONS_LIMIT) {
+      lines.push(`Showing ${DASHBOARD_POSITIONS_LIMIT} of ${paperAll.length} paper trades.`);
+    }
+  } else {
+    lines.push("Paper Trades", "No paper trades yet.");
+  }
+
+  return {
+    text: wrapCodeBlock(lines),
+    keyboard: buildPositionsKeyboard(!!user?.auto_claim, false),
+  };
+}
+
 function withDashboardNotice(baseText: string, notice?: string) {
+
   if (!notice) return baseText;
-  return [`*Dashboard Update*`, notice, "", baseText].join("\n");
+  return [`Dashboard Update`, notice, "", baseText].join("\n");
 }
 
 async function renderDashboardPage(userId: string, user: any, page: string, notice?: string) {
@@ -498,6 +656,13 @@ async function renderDashboardPage(userId: string, user: any, page: string, noti
   const hasClaimables = claimableTrades.length > 0;
 
   if (!user) {
+    if (["refresh", "main", "welcome", "claimable", "balance", "status", "stats", "daily", "controls", "risk_settings", "wallet_check", "orders", "history"].includes(page)) {
+      return {
+        text: withDashboardNotice(buildWelcomeDashboard(), notice || "No wallet profile found yet. Choose Real Trade or Paper Trade to begin."),
+        keyboard: buildOnboardingKeyboard(),
+      };
+    }
+
     if (page === "help") {
       return {
         text: withDashboardNotice([
@@ -525,6 +690,13 @@ async function renderDashboardPage(userId: string, user: any, page: string, noti
     };
   }
 
+  if (page === "welcome") {
+    return {
+      text: withDashboardNotice(buildWelcomeDashboard(), notice),
+      keyboard: buildOnboardingKeyboard(),
+    };
+  }
+
   if (page === "refresh" || page === "main") {
     const dashboard = await buildPositionsDashboard(userId, user);
     return {
@@ -533,10 +705,24 @@ async function renderDashboardPage(userId: string, user: any, page: string, noti
     };
   }
 
+  if (page === "orders") {
+    return {
+      text: withDashboardNotice((await buildActiveOrdersPage(userId, user)).text, notice),
+      keyboard: buildPositionsKeyboard(!!user?.auto_claim, false),
+    };
+  }
+
+  if (page === "history") {
+    return {
+      text: withDashboardNotice((await buildTradeHistoryPage(userId, user)).text, notice),
+      keyboard: buildPositionsKeyboard(!!user?.auto_claim, false),
+    };
+  }
+
   if (page === "setup") {
     return {
       text: withDashboardNotice(buildSetupMessage(user), notice),
-      keyboard: buildSetupKeyboard(true),
+      keyboard: buildSetupKeyboard(true, hasImportedWallet(user)),
     };
   }
 
@@ -578,15 +764,18 @@ async function renderDashboardPage(userId: string, user: any, page: string, noti
   if (page === "wallet_check") {
     return {
       text: withDashboardNotice(await buildWalletCheckMessage(user), notice),
-      keyboard: buildSetupKeyboard(true),
+      keyboard: buildSetupKeyboard(true, hasImportedWallet(user)),
     };
   }
 
   if (page === "stats") {
     const overall = db.getOverallStats(userId);
+    const paperStats = db.getPaperStats(userId);
     return {
       text: withDashboardNotice(
-        overall.total === 0 ? "*Overall Performance*\n\n_No trades recorded yet._" : buildStatsMessage(overall),
+        (overall.total === 0 && paperStats.total === 0)
+          ? "*Overall Performance*\n\n_No trades recorded yet._"
+          : buildStatsMessage(overall, paperStats),
         notice
       ),
       keyboard: buildDetailKeyboard(autoClaim, hasClaimables, "stats"),
@@ -627,7 +816,7 @@ async function renderDashboardPage(userId: string, user: any, page: string, noti
 async function safeEditDashboardMessage(ctx: any, text: string, keyboard: InlineKeyboard) {
   try {
     await ctx.editMessageText(text, {
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       reply_markup: keyboard,
     });
     return true;
@@ -642,34 +831,38 @@ async function safeEditDashboardMessage(ctx: any, text: string, keyboard: Inline
 
 function buildClaimableMessage(claimableTrades: any[]) {
   if (claimableTrades.length === 0) {
-    return "*Claim Center*\n\n_No settled winning trades are waiting to be claimed._";
+    return wrapCodeBlock([
+      "Claim Center",
+      "",
+      "No settled winning trades are waiting to be claimed.",
+    ]);
   }
 
   const totalSize = claimableTrades.reduce((sum, trade) => sum + Number(trade.size || 0), 0);
   const lines = [
-    "*Claim Center*",
+    "Claim Center",
     "",
-    "*Overview*",
-    `Claimable Markets: ${claimableTrades.length}`,
-    `Claimable Size: ${totalSize.toFixed(2)}`,
+    "Overview",
+    formatKeyValue("Claimable Markets", claimableTrades.length),
+    formatKeyValue("Claimable Size", totalSize.toFixed(2)),
     "",
-    "*Ready To Claim*",
+    "Ready To Claim",
   ];
   claimableTrades.slice(0, CLAIMABLE_BUTTON_LIMIT).forEach((trade, index) => {
     lines.push(
-      `${index + 1}. \`${trade.market_id}\``,
-      `Side: ${trade.side}`,
-      `Size: ${trade.size}`,
-      `Entry: ${trade.buy_price.toFixed(4)}`,
+      `${index + 1}. ${trade.market_id}`,
+      formatKeyValue("Side", trade.side),
+      formatKeyValue("Size", trade.size),
+      formatKeyValue("Entry", trade.buy_price.toFixed(4)),
       ""
     );
   });
 
   if (claimableTrades.length > CLAIMABLE_BUTTON_LIMIT) {
-    lines.push(`_Showing ${CLAIMABLE_BUTTON_LIMIT} of ${claimableTrades.length} claimable markets._`);
+    lines.push(`Showing ${CLAIMABLE_BUTTON_LIMIT} of ${claimableTrades.length} claimable markets.`);
   }
 
-  return lines.join("\n").trim();
+  return wrapCodeBlock(lines.map((line) => String(line))).trim();
 }
 
 async function claimMarketForUser(userId: string, user: any, marketId: string) {
@@ -777,9 +970,9 @@ bot.command("start", async (ctx) => {
   console.log(`[BOT] User ${ctx.from?.id} ran /start`);
   if (!ctx.from) return;
   const user: any = db.getUser(ctx.from.id.toString());
-  const view = await renderDashboardPage(ctx.from.id.toString(), user, "main");
+  const view = await renderDashboardPage(ctx.from.id.toString(), user, "welcome");
   ctx.reply(view.text, {
-    parse_mode: "Markdown",
+    parse_mode: "HTML",
     reply_markup: view.keyboard,
   });
 });
@@ -813,10 +1006,11 @@ bot.command("stats", (ctx) => {
   if (!ctx.from) return;
   console.log(`[BOT] User ${ctx.from.id} ran /stats`);
   const overall = db.getOverallStats(ctx.from.id.toString());
+  const paperStats = db.getPaperStats(ctx.from.id.toString());
 
-  if (overall.total === 0) return ctx.reply("No trades recorded yet.");
+  if (overall.total === 0 && paperStats.total === 0) return ctx.reply("No trades recorded yet.");
 
-  ctx.reply(buildStatsMessage(overall), { parse_mode: "Markdown" });
+  ctx.reply(buildStatsMessage(overall, paperStats), { parse_mode: "HTML" });
 });
 
 bot.command("daily", (ctx) => {
@@ -825,7 +1019,7 @@ bot.command("daily", (ctx) => {
   const daily = db.getDailyStats(ctx.from.id.toString());
   const overall = db.getOverallStats(ctx.from.id.toString());
 
-  ctx.reply(buildDailyMessage(daily, overall), { parse_mode: "Markdown" });
+  ctx.reply(buildDailyMessage(daily, overall), { parse_mode: "HTML" });
 });
 
 bot.command("import", async (ctx) => {
@@ -845,7 +1039,7 @@ bot.command("status", (ctx) => {
   const user: any = db.getUser(ctx.from.id.toString());
   if (!user) return ctx.reply("User data not found. Use /import first.");
 
-  ctx.reply(buildStatusMessage(user), { parse_mode: "Markdown" });
+  ctx.reply(buildStatusMessage(user), { parse_mode: "HTML" });
 });
 
 bot.command("balance", async (ctx) => {
@@ -853,9 +1047,10 @@ bot.command("balance", async (ctx) => {
   console.log(`[BOT] User ${ctx.from.id} ran /balance`);
   const user: any = db.getUser(ctx.from.id.toString());
   if (!user) return ctx.reply("Use /import first.");
+  if (!hasImportedWallet(user)) return ctx.reply("No live wallet is attached. Import one to check onchain balance.");
 
   try {
-    ctx.reply(await buildBalanceMessage(user), { parse_mode: "Markdown" });
+    ctx.reply(await buildBalanceMessage(user), { parse_mode: "HTML" });
   } catch (e: any) {
     console.error(`[BOT] Balance Error: ${e.message}`);
     ctx.reply(`Balance Error: ${e.message}`);
@@ -867,10 +1062,11 @@ bot.command("fund_funder", async (ctx) => {
   console.log(`[BOT] User ${ctx.from.id} ran /fund_funder ${ctx.match}`);
   const user: any = db.getUser(ctx.from.id.toString());
   if (!user) return ctx.reply("Use /import first.");
+  if (!hasImportedWallet(user)) return ctx.reply("No live wallet is attached. Import one to fund the trading wallet.");
 
   const amount = parseFloat((ctx.match || "").trim());
   if (!Number.isFinite(amount) || amount <= 0) {
-    return ctx.reply("Provide an amount in USDC.e. Example: /fund_funder 25");
+    return ctx.reply("Provide an amount in pUSD. Example: /fund_funder 25");
   }
 
   try {
@@ -881,10 +1077,10 @@ bot.command("fund_funder", async (ctx) => {
       passphrase: user.api_passphrase
     }, user.private_key, accountConfig);
 
-    const txHash = await poly.transferUsdcToFunder(amount);
+    const txHash = await poly.transferPusdToFunder(amount);
     ctx.reply(
-      `Signer-to-funder transfer submitted for ${amount.toFixed(2)} USDC.e.\n` +
-      `Only use this if you intentionally want to move Polygon USDC.e into your Polymarket trading wallet.\n` +
+      `Signer-to-funder transfer submitted for ${amount.toFixed(2)} pUSD.\n` +
+      `Only use this if you intentionally want to move Polygon pUSD into your Polymarket trading wallet.\n` +
       `https://polygonscan.com/tx/${txHash}`
     );
   } catch (e: any) {
@@ -898,6 +1094,7 @@ bot.command("check_wallets", async (ctx) => {
   console.log(`[BOT] User ${ctx.from.id} ran /check_wallets`);
   const user: any = db.getUser(ctx.from.id.toString());
   if (!user) return ctx.reply("Use /import first.");
+  if (!hasImportedWallet(user)) return ctx.reply("No live wallet is attached. Import one to run wallet checks.");
 
   try {
     const accountConfig = resolveUserPolymarketAccountConfig(user);
@@ -938,6 +1135,7 @@ bot.command("approve", async (ctx) => {
   console.log(`[BOT] User ${ctx.from.id} ran /approve`);
   const user: any = db.getUser(ctx.from.id.toString());
   if (!user) return ctx.reply("Use /import first.");
+  if (!hasImportedWallet(user)) return ctx.reply("No live wallet is attached. Import one before sending approvals.");
 
   try {
     const accountConfig = resolveUserPolymarketAccountConfig(user);
@@ -948,7 +1146,7 @@ bot.command("approve", async (ctx) => {
     }, user.private_key, accountConfig);
 
     ctx.reply("Sending master approvals. This may take a few seconds.");
-    const hashes = await poly.approveUSDC();
+    const hashes = await poly.approveCollateral();
     const links = hashes.map((hash, index) => `Tx ${index + 1}: https://polygonscan.com/tx/${hash}`);
     ctx.reply(`Master approval successful.\n\n${links.join("\n")}\n\nYou can now check your status with /balance in a minute.`);
   } catch (e: any) {
@@ -965,7 +1163,7 @@ bot.command("positions", async (ctx) => {
   try {
     const view = await renderDashboardPage(ctx.from.id.toString(), user, "main");
     ctx.reply(view.text, {
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       reply_markup: view.keyboard,
     });
   } catch (e: any) {
@@ -987,7 +1185,7 @@ bot.command("claimable", (ctx) => {
   }
 
   ctx.reply(buildClaimableMessage(claimableTrades), {
-    parse_mode: "Markdown",
+    parse_mode: "HTML",
     reply_markup: buildClaimableKeyboard(claimableTrades, !!user.auto_claim),
   });
 });
@@ -1003,6 +1201,7 @@ bot.command("claim", async (ctx) => {
 
   const user: any = db.getUser(ctx.from.id.toString());
   if (!user) return ctx.reply("Use /import first.");
+  if (!hasImportedWallet(user)) return ctx.reply("No live wallet is attached. Import one before submitting claims.");
 
   try {
     const txHash = await claimMarketForUser(ctx.from.id.toString(), user, marketId);
@@ -1019,6 +1218,7 @@ bot.command("claim_all", async (ctx) => {
 
   const user: any = db.getUser(ctx.from.id.toString());
   if (!user) return ctx.reply("Use /import first.");
+  if (!hasImportedWallet(user)) return ctx.reply("No live wallet is attached. Import one before claiming winnings.");
 
   ctx.reply(await claimAllForUser(ctx.from.id.toString(), user));
 });
@@ -1076,6 +1276,10 @@ bot.command("set_max_open", (ctx) => {
 bot.command("start_trading", (ctx) => {
   if (!ctx.from) return;
   console.log(`[BOT] User ${ctx.from.id} ran /start_trading`);
+  const user: any = db.getUser(ctx.from.id.toString());
+  if (!user || !hasImportedWallet(user)) {
+    return ctx.reply("Import a live wallet before enabling real auto-trading.");
+  }
   db.updateTradingStatus(ctx.from.id.toString(), true);
   ctx.reply("Auto-trading enabled.");
 });
@@ -1090,8 +1294,8 @@ bot.command("stop_trading", (ctx) => {
 bot.command("remove_wallet", (ctx) => {
   if (!ctx.from) return;
   console.log(`[BOT] User ${ctx.from.id} ran /remove_wallet`);
-  db.removeUser(ctx.from.id.toString());
-  ctx.reply("Your wallet and credentials have been deleted from the bot.");
+  db.clearUserWallet(ctx.from.id.toString());
+  ctx.reply("Live wallet credentials were removed. Your profile, settings, and paper-testing data were kept.");
 });
 
 bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
@@ -1101,7 +1305,7 @@ bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
   const user: any = db.getUser(userId);
 
   try {
-    if (["main", "refresh", "setup", "help"].includes(action)) {
+    if (["main", "refresh", "setup", "help", "welcome"].includes(action)) {
       const view = await renderDashboardPage(userId, user, action);
       const changed = await safeEditDashboardMessage(ctx, view.text, view.keyboard);
       await ctx.answerCallbackQuery({
@@ -1126,12 +1330,48 @@ bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
       return;
     }
 
-    if (!user) {
-      await ctx.answerCallbackQuery({ text: "Import a wallet first.", show_alert: true });
+    if (action === "real_trade") {
+      if (user?.paper_testing_active) {
+        db.updatePaperTestingStatus(userId, false);
+      }
+      const updatedUser: any = db.getUser(userId);
+      const view = await renderDashboardPage(
+        userId,
+        updatedUser,
+        "setup",
+        "Real Trade selected. Import a wallet, approve pUSD, and fund the trading wallet to continue."
+      );
+      await safeEditDashboardMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery({ text: "Real trade selected." });
       return;
     }
 
-    if (["claimable", "balance", "status", "stats", "daily", "controls", "risk_settings", "wallet_check"].includes(action)) {
+    if (action === "paper_trade") {
+      db.updatePaperTestingStatus(userId, true);
+      const updatedUser: any = db.getUser(userId);
+      const view = await renderDashboardPage(
+        userId,
+        updatedUser,
+        "controls",
+        "Paper Trade selected. Paper testing is now enabled."
+      );
+      await safeEditDashboardMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery({ text: "Paper trade selected." });
+      return;
+    }
+
+    if (!user) {
+      const fallbackView = await renderDashboardPage(userId, user, "setup", "No wallet profile found yet.");
+      await safeEditDashboardMessage(ctx, fallbackView.text, fallbackView.keyboard);
+      await ctx.answerCallbackQuery({ text: "Open Setup to get started." });
+      return;
+    }
+
+    if (["claimable", "balance", "status", "stats", "daily", "controls", "risk_settings", "wallet_check", "orders", "history"].includes(action)) {
+      if (["balance", "wallet_check"].includes(action) && !hasImportedWallet(user)) {
+        await ctx.answerCallbackQuery({ text: "Import a live wallet for that action.", show_alert: true });
+        return;
+      }
       const view = await renderDashboardPage(userId, user, action);
       const changed = await safeEditDashboardMessage(ctx, view.text, view.keyboard);
       await ctx.answerCallbackQuery({ text: changed ? "Dashboard updated." : "Already up to date." });
@@ -1139,6 +1379,10 @@ bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
     }
 
     if (action === "approve") {
+      if (!hasImportedWallet(user)) {
+        await ctx.answerCallbackQuery({ text: "Import a live wallet first.", show_alert: true });
+        return;
+      }
       const accountConfig = resolveUserPolymarketAccountConfig(user);
       const poly = new PolyMarketAPI({
         key: user.api_key,
@@ -1146,7 +1390,7 @@ bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
         passphrase: user.api_passphrase
       }, user.private_key, accountConfig);
 
-      const hashes = await poly.approveUSDC();
+      const hashes = await poly.approveCollateral();
       const links = hashes.map((hash, index) => `Tx ${index + 1}: https://polygonscan.com/tx/${hash}`).join("\n");
       const view = await renderDashboardPage(userId, user, "setup", `Approvals submitted.\n${links}`);
       await safeEditDashboardMessage(ctx, view.text, view.keyboard);
@@ -1155,10 +1399,14 @@ bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
     }
 
     if (action === "fund_prompt") {
+      if (!hasImportedWallet(user)) {
+        await ctx.answerCallbackQuery({ text: "Import a live wallet first.", show_alert: true });
+        return;
+      }
       ctx.session.step = "awaiting_fund_amount";
-      const view = await renderDashboardPage(userId, user, "setup", "Funding prompt opened. Send the USDC.e amount to move.");
+      const view = await renderDashboardPage(userId, user, "setup", "Funding prompt opened. Send the pUSD amount to move.");
       await safeEditDashboardMessage(ctx, view.text, view.keyboard);
-      await ctx.reply("Send the amount of USDC.e to move into the trading wallet. Example: `25`", { parse_mode: "Markdown" });
+      await ctx.reply("Send the amount of pUSD to move into the trading wallet. Example: `25`", { parse_mode: "Markdown" });
       await ctx.answerCallbackQuery({ text: "Send funding amount." });
       return;
     }
@@ -1192,6 +1440,10 @@ bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
 
     if (action === "start_trading" || action === "stop_trading") {
       const enabled = action === "start_trading";
+      if (enabled && !hasImportedWallet(user)) {
+        await ctx.answerCallbackQuery({ text: "Import a live wallet before enabling real trading.", show_alert: true });
+        return;
+      }
       db.updateTradingStatus(userId, enabled);
       const updatedUser: any = db.getUser(userId);
       const view = await renderDashboardPage(
@@ -1206,6 +1458,10 @@ bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
     }
 
     if (action === "claim_all") {
+      if (!hasImportedWallet(user)) {
+        await ctx.answerCallbackQuery({ text: "Import a live wallet before claiming.", show_alert: true });
+        return;
+      }
       const result = await claimAllForUser(userId, user);
       const updatedUser: any = db.getUser(userId);
       const view = await renderDashboardPage(userId, updatedUser, "claimable", result);
@@ -1229,7 +1485,40 @@ bot.callbackQuery(/^positions:(.+)$/, async (ctx) => {
       return;
     }
 
+    if (action === "paper_testing_on" || action === "paper_testing_off") {
+      const enabled = action === "paper_testing_on";
+      db.updatePaperTestingStatus(userId, enabled);
+      const updatedUser: any = db.getUser(userId);
+      const view = await renderDashboardPage(
+        userId,
+        updatedUser,
+        "controls",
+        enabled ? "Paper signal testing enabled." : "Paper signal testing disabled."
+      );
+      await safeEditDashboardMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery({ text: enabled ? "Paper testing enabled." : "Paper testing disabled." });
+      return;
+    }
+
+    if (action === "remove_wallet") {
+      db.clearUserWallet(userId);
+      const updatedUser: any = db.getUser(userId);
+      const view = await renderDashboardPage(
+        userId,
+        updatedUser,
+        "setup",
+        "Live wallet removed. Profile settings and paper-testing data were kept."
+      );
+      await safeEditDashboardMessage(ctx, view.text, view.keyboard);
+      await ctx.answerCallbackQuery({ text: "Wallet removed." });
+      return;
+    }
+
     if (action.startsWith("claim:")) {
+      if (!hasImportedWallet(user)) {
+        await ctx.answerCallbackQuery({ text: "Import a live wallet before claiming.", show_alert: true });
+        return;
+      }
       const tradeId = Number.parseInt(action.slice("claim:".length), 10);
       if (!Number.isInteger(tradeId)) {
         throw new Error("Invalid claim selection.");
@@ -1330,7 +1619,7 @@ bot.on("message:text", async (ctx) => {
       const savedUser: any = db.getUser(ctx.from.id.toString());
       const view = await renderDashboardPage(ctx.from.id.toString(), savedUser, "setup", "Wallet import completed.");
       ctx.reply(view.text, {
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: view.keyboard,
       });
       ctx.session.step = "";
@@ -1360,7 +1649,7 @@ bot.on("message:text", async (ctx) => {
 
     const amount = parseFloat(ctx.message.text.trim());
     if (!Number.isFinite(amount) || amount <= 0) {
-      ctx.reply("Send a valid USDC.e amount. Example: `25`", { parse_mode: "Markdown" });
+      ctx.reply("Send a valid pUSD amount. Example: `25`", { parse_mode: "Markdown" });
       return;
     }
 
@@ -1371,9 +1660,9 @@ bot.on("message:text", async (ctx) => {
         secret: user.api_secret,
         passphrase: user.api_passphrase
       }, user.private_key, accountConfig);
-      const txHash = await poly.transferUsdcToFunder(amount);
+      const txHash = await poly.transferPusdToFunder(amount);
       ctx.reply(
-        `Signer-to-funder transfer submitted for ${amount.toFixed(2)} USDC.e.\nhttps://polygonscan.com/tx/${txHash}`
+        `Signer-to-funder transfer submitted for ${amount.toFixed(2)} pUSD.\nhttps://polygonscan.com/tx/${txHash}`
       );
       ctx.session.step = "";
     } catch (e: any) {

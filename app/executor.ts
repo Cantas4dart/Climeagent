@@ -26,6 +26,25 @@ function resolveUserPolymarketAccountConfig(user: any) {
   };
 }
 
+function escapeHtml(value: string) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapePreBlock(value: string) {
+  return escapeHtml(value).replace(/\n/g, "\n");
+}
+
+function buildAlignedMonoRow(left: string, right: string, leftWidth = 22) {
+  return `${left.padEnd(leftWidth, " ")}${right}`;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class TradeExecutor {
   private db: DBManager;
   private signalPath: string;
@@ -65,6 +84,7 @@ export class TradeExecutor {
     const marketStates = data.market_states || [];
 
     await this.processOpenTrades(marketStates);
+    await this.processPaperSignals(signals);
 
     if (signals.length === 0) {
       console.log("[EXEC] No active signals in file.");
@@ -78,10 +98,10 @@ export class TradeExecutor {
     for (const user of activeUsers) {
       const accountConfig = resolveUserPolymarketAccountConfig(user);
       const poly = new PolyMarketAPI({
-        key: user.api_key,
-        secret: user.api_secret,
-        passphrase: user.api_passphrase
-      }, user.private_key, accountConfig);
+        key: user.api_key || "",
+        secret: user.api_secret || "",
+        passphrase: user.api_passphrase || ""
+      }, user.private_key || "", accountConfig);
       let openPositionCount = this.db.getUnsettledTradeCount(user.tg_id);
 
       for (const signal of signals) {
@@ -119,8 +139,8 @@ export class TradeExecutor {
 
           // Auto-Approve if balance exists but allowance is missing
           if (balance > 0.1 && allowance < 1.0) {
-            console.log(`[EXEC] Auto-approving USDC allowance (Master Approval) for user ${user.tg_id}...`);
-            await poly.approveUSDC();
+            console.log(`[EXEC] Auto-approving pUSD allowance (Master Approval) for user ${user.tg_id}...`);
+            await poly.approveCollateral();
             console.log(`[EXEC] Master Auto-approval transactions sent.`);
             // Continue with the loop, next run will pick up the new allowance
             continue;
@@ -160,6 +180,7 @@ export class TradeExecutor {
             entry_confidence: signal.confidence_score ?? null,
             entry_spread: signal.ensemble_spread ?? null,
             entry_regime: signal.regime ?? null,
+            learning_features: signal.learning_features ? JSON.stringify(signal.learning_features) : null,
           });
           if (reservation.changes === 0) {
             console.log(`[EXEC] Trade already reserved or recorded for ${user.tg_id} on market ${signal.market_id}. Skipping.`);
@@ -189,6 +210,51 @@ export class TradeExecutor {
     }
   }
 
+  private async processPaperSignals(signals: any[]) {
+    if (!Array.isArray(signals) || signals.length === 0) {
+      return;
+    }
+
+    const paperUsers: User[] = this.db.getPaperTestingUsers();
+    if (paperUsers.length === 0) {
+      return;
+    }
+
+    for (const user of paperUsers) {
+      for (const signal of signals) {
+        if (this.db.hasPaperTrade(user.tg_id, signal.market_id)) {
+          continue;
+        }
+
+        const side = signal.action.split("_")[1] as "YES" | "NO";
+        const entryPrice = Number(signal.entry_price || signal.market_price);
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+          continue;
+        }
+
+        const result = this.db.reservePaperTrade({
+          market_id: signal.market_id,
+          condition_id: signal.condition_id,
+          tg_id: user.tg_id,
+          side,
+          entry_price: entryPrice,
+          size: 1,
+          entry_model_prob: signal.adjusted_model_prob ?? signal.avg_model_prob ?? null,
+          entry_market_prob: signal.action === "BUY_YES" ? signal.market_price_yes : signal.market_price_no,
+          entry_confidence: signal.confidence_score ?? null,
+          entry_spread: signal.ensemble_spread ?? null,
+          entry_regime: signal.regime ?? null,
+          learning_features: signal.learning_features ? JSON.stringify(signal.learning_features) : null,
+        });
+
+        if (result.changes > 0) {
+          await this.sendPaperTradeAlert(user.tg_id, signal, side, entryPrice);
+          console.log(`[EXEC] Paper trade logged for ${user.tg_id} on ${signal.market_id}`);
+        }
+      }
+    }
+  }
+
   private async sendTradeAlert(
     tgId: string,
     signal: any,
@@ -202,31 +268,58 @@ export class TradeExecutor {
     }
 
     const lines = [
-      "Trade Alert",
+      "<b>📄 Signal</b>",
       "",
-      `Market: ${signal.question}`,
-      `Option: ${side}`,
-      `Price: ${entryPrice.toFixed(4)}`,
-      `Size: ${size} shares`,
-      `Mode: ${signal.mode || "standard"}`,
-      `Confidence: ${Number(signal.confidence_score || 0).toFixed(2)}`,
+      "<b>🪙 Market</b>",
+      escapeHtml(signal.question || signal.market_id),
+      "",
+      "<b>🎯 Position</b>          <b>⚙️ Mode</b>",
+      buildAlignedMonoRow(`${side} @ ${entryPrice.toFixed(4)}`, signal.mode || "standard"),
+      `(${size} share${size === 1 ? "" : "s"})`,
+      "",
+      "<b>📊 Confidence</b>",
+      `<b>${Number(signal.confidence_score || 0).toFixed(2)}</b>`,
     ];
 
     if (orderResponse?.orderID) {
-      lines.push(`Order ID: ${String(orderResponse.orderID)}`);
+      lines.push("", "<b>🧾 Order ID</b>", escapeHtml(String(orderResponse.orderID)));
     }
     if (orderResponse?.status) {
-      lines.push(`Status: ${orderResponse.status}`);
+      lines.push("<b>Status</b>", escapeHtml(String(orderResponse.status)));
     }
 
-    lines.push("");
-    lines.push("Order accepted by Polymarket. It may still be waiting to fill.");
+    lines.push("", "<i>Order accepted by Polymarket. It may still be waiting to fill.</i>");
 
-    try {
-      await this.bot.api.sendMessage(tgId, lines.join("\n"));
-    } catch (e: any) {
-      console.warn(`[EXEC] Could not send trade alert to ${tgId}: ${e.message}`);
+    await this.sendTelegramAlert(tgId, lines.join("\n"), "trade");
+  }
+
+  private async sendPaperTradeAlert(
+    tgId: string,
+    signal: any,
+    side: string,
+    entryPrice: number,
+  ) {
+    if (!this.bot) {
+      return;
     }
+
+    const lines = [
+      "<b>📄 Paper Signal</b>",
+      "",
+      "<b>🪙 Market</b>",
+      escapeHtml(signal.question || signal.market_id),
+      "",
+      "<b>🎯 Position</b>          <b>⚙️ Mode</b>",
+      buildAlignedMonoRow(`${side} @ ${entryPrice.toFixed(4)}`, signal.mode || "standard"),
+      `(1 share)`,
+      "",
+      "<b>📊 Confidence</b>",
+      `<b>${Number(signal.confidence_score || 0).toFixed(2)}</b>`,
+      "",
+      "<i>No real order was placed. This signal will be scored when the market settles.</i>",
+    ];
+
+    await this.sendTelegramAlert(tgId, lines.join("\n"), "paper trade");
   }
 
   private async processOpenTrades(marketStates: any[]) {
@@ -245,6 +338,8 @@ export class TradeExecutor {
     if (activeTrades.length === 0) {
       return;
     }
+
+    const openOrderIdsByUser = new Map<string, Set<string>>();
 
     for (const trade of activeTrades) {
       const state = stateByMarket.get(String(trade.market_id));
@@ -270,10 +365,36 @@ export class TradeExecutor {
       const sharesToSell = Math.max(1, Math.min(remainingSize, Math.floor(remainingSize * assessment.exitFraction)));
       const accountConfig = resolveUserPolymarketAccountConfig(user);
       const poly = new PolyMarketAPI({
-        key: user.api_key,
-        secret: user.api_secret,
-        passphrase: user.api_passphrase
-      }, user.private_key, accountConfig);
+        key: user.api_key || "",
+        secret: user.api_secret || "",
+        passphrase: user.api_passphrase || ""
+      }, user.private_key || "", accountConfig);
+
+      if (!openOrderIdsByUser.has(trade.tg_id)) {
+        try {
+          const openOrders = await poly.getOpenOrders();
+          const openIds = new Set<string>();
+          for (const order of openOrders || []) {
+            const orderView = order as any;
+            const rawId = orderView?.id ?? orderView?.orderID ?? orderView?.orderId;
+            if (rawId != null) {
+              openIds.add(String(rawId));
+            }
+          }
+          openOrderIdsByUser.set(trade.tg_id, openIds);
+        } catch (e: any) {
+          console.warn(`[EXEC] Could not refresh open orders for conflict monitor ${trade.tg_id}: ${e.message}`);
+          openOrderIdsByUser.set(trade.tg_id, new Set<string>());
+        }
+      }
+
+      if (trade.order_id && openOrderIdsByUser.get(trade.tg_id)?.has(String(trade.order_id))) {
+        console.log(
+          `[EXEC] Conflict monitor is skipping ${trade.market_id} for ${trade.tg_id} ` +
+          `because entry order ${trade.order_id} is still open on Polymarket.`
+        );
+        continue;
+      }
 
       try {
         const marketData = await poly.getMarketById(trade.market_id);
@@ -384,27 +505,57 @@ export class TradeExecutor {
     }
 
     const lines = [
-      "Conflict Exit Alert",
+      "<b>📉 Conflict Exit</b>",
       "",
-      `Market: ${state.question || trade.market_id}`,
-      `Side Reduced: ${trade.side}`,
-      `Shares Sold: ${sharesSold}`,
-      `Remaining Size: ${remainingSize}`,
-      `Conflict Score: ${Number(assessment.conflictScore).toFixed(2)}`,
-      `Reason: ${assessment.reason}`,
+      "<b>🪙 Market</b>",
+      escapeHtml(state.question || trade.market_id),
+      "",
+      "<b>🎯 Side Reduced</b>          <b>⚙️ Reason</b>",
+      `${trade.side}${" ".repeat(Math.max(1, 16 - String(trade.side).length))}${assessment.reason}`,
+      `Sold ${sharesSold} | Left ${remainingSize}`,
+      "",
+      "<b>📊 Conflict Score</b>",
+      `<b>${Number(assessment.conflictScore).toFixed(2)}</b>`,
     ];
 
     if (orderResponse?.orderID) {
-      lines.push(`Order ID: ${String(orderResponse.orderID)}`);
+      lines.push(`<b>Order ID</b>  ${escapeHtml(String(orderResponse.orderID))}`);
     }
     if (orderResponse?.status) {
-      lines.push(`Status: ${orderResponse.status}`);
+      lines.push(`<b>Status</b>  ${escapeHtml(String(orderResponse.status))}`);
     }
 
-    try {
-      await this.bot.api.sendMessage(tgId, lines.join("\n"));
-    } catch (e: any) {
-      console.warn(`[EXEC] Could not send exit alert to ${tgId}: ${e.message}`);
+    await this.sendTelegramAlert(tgId, lines.join("\n"), "exit");
+  }
+
+  private async sendTelegramAlert(tgId: string, message: string, kind: string) {
+    if (!this.bot) {
+      return;
+    }
+
+    const maxAttempts = 3;
+    let lastError: any = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.bot.api.sendMessage(tgId, message, { parse_mode: "HTML" });
+        return;
+      } catch (e: any) {
+        lastError = e;
+        const reason = String(e?.message || e);
+        if (attempt < maxAttempts) {
+          console.warn(
+            `[EXEC] Telegram ${kind} alert failed for ${tgId} on attempt ${attempt}/${maxAttempts}: ${reason}. Retrying...`
+          );
+          await sleep(1000 * attempt);
+          continue;
+        }
+        console.warn(`[EXEC] Could not send ${kind} alert to ${tgId}: ${reason}`);
+      }
+    }
+
+    if (lastError) {
+      console.warn(`[EXEC] Telegram ${kind} alert gave up for ${tgId}.`);
     }
   }
 }

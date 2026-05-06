@@ -339,7 +339,7 @@ class MarketClient:
 
     def parse_market_location(self, market_description):
         """
-        Resolve a city from market question to (lat, lon, is_us) coordinates.
+        Resolve a city from market question to rich location metadata.
 
         Strategy:
         1. Check the hardcoded dictionary first (fastest, most reliable).
@@ -351,71 +351,71 @@ class MarketClient:
         # --- Step 1: Hardcoded high-priority locations ---
         locations = {
             # US Markets (is_us=True -> uses NOAA forecast)
-            "New York": (40.7128, -74.0060, True),
-            "NYC": (40.7128, -74.0060, True),
-            "Chicago": (41.8781, -87.6298, True),
-            "Washington": (38.9072, -77.0369, True),
-            "Los Angeles": (34.0522, -118.2437, True),
-            "Miami": (25.7617, -80.1918, True),
-            "Phoenix": (33.4484, -112.0740, True),
-            "Dallas": (32.7767, -96.7970, True),
-            "Houston": (29.7604, -95.3698, True),
-            "Denver": (39.7392, -104.9903, True),
-            "Atlanta": (33.7490, -84.3880, True),
-            "Seattle": (47.6062, -122.3321, True),
-            "San Francisco": (37.7749, -122.4194, True),
-            "Boston": (42.3601, -71.0589, True),
+            "New York": self._location_details("New York", 40.7128, -74.0060, True, "US", "United States", "North America", "America/New_York"),
+            "NYC": self._location_details("New York", 40.7128, -74.0060, True, "US", "United States", "North America", "America/New_York"),
+            "Chicago": self._location_details("Chicago", 41.8781, -87.6298, True, "US", "United States", "North America", "America/Chicago"),
+            "Washington": self._location_details("Washington", 38.9072, -77.0369, True, "US", "United States", "North America", "America/New_York"),
+            "Los Angeles": self._location_details("Los Angeles", 34.0522, -118.2437, True, "US", "United States", "North America", "America/Los_Angeles"),
+            "Miami": self._location_details("Miami", 25.7617, -80.1918, True, "US", "United States", "North America", "America/New_York"),
+            "Phoenix": self._location_details("Phoenix", 33.4484, -112.0740, True, "US", "United States", "North America", "America/Phoenix"),
+            "Dallas": self._location_details("Dallas", 32.7767, -96.7970, True, "US", "United States", "North America", "America/Chicago"),
+            "Houston": self._location_details("Houston", 29.7604, -95.3698, True, "US", "United States", "North America", "America/Chicago"),
+            "Denver": self._location_details("Denver", 39.7392, -104.9903, True, "US", "United States", "North America", "America/Denver"),
+            "Atlanta": self._location_details("Atlanta", 33.7490, -84.3880, True, "US", "United States", "North America", "America/New_York"),
+            "Seattle": self._location_details("Seattle", 47.6062, -122.3321, True, "US", "United States", "North America", "America/Los_Angeles"),
+            "San Francisco": self._location_details("San Francisco", 37.7749, -122.4194, True, "US", "United States", "North America", "America/Los_Angeles"),
+            "Boston": self._location_details("Boston", 42.3601, -71.0589, True, "US", "United States", "North America", "America/New_York"),
 
             # International Markets (is_us=False -> uses Open-Meteo multi-model)
-            "London": (51.5074, -0.1278, False),
-            "Paris": (48.8566, 2.3522, False),
-            "Tokyo": (35.6762, 139.6503, False),
-            "Amsterdam": (52.3676, 4.9041, False),
-            "Hong Kong": (22.3193, 114.1694, False),
-            "Singapore": (1.3521, 103.8198, False),
-            "Sydney": (-33.8688, 151.2093, False),
-            "Berlin": (52.5200, 13.4050, False),
-            "Toronto": (43.6532, -79.3832, False),
-            "Dubai": (25.2048, 55.2708, False),
-            "Mumbai": (19.0760, 72.8777, False),
-            "Delhi": (28.6139, 77.2090, False),
-            "Beijing": (39.9042, 116.4074, False),
-            "Seoul": (37.5665, 126.9780, False),
-            "Madrid": (40.4168, -3.7038, False),
-            "Rome": (41.9028, 12.4964, False),
-            "Taipei": (25.0330, 121.5654, False),
-            "Shenzhen": (22.5431, 114.0579, False),
-            "Wuhan": (30.5928, 114.3055, False),
-            "Sao Paulo": (-23.5505, -46.6333, False),
-            "Istanbul": (41.0082, 28.9784, False),
-            "Shanghai": (31.2304, 121.4737, False),
-            "Chongqing": (29.4316, 106.9123, False),
-            "Helsinki": (60.1699, 24.9384, False),
-            "Moscow": (55.7558, 37.6173, False),
-            "Bangkok": (13.7563, 100.5018, False),
-            "Jakarta": (-6.2088, 106.8456, False),
-            "Mexico City": (19.4326, -99.1332, False),
-            "Cairo": (30.0444, 31.2357, False),
-            "Lagos": (6.5244, 3.3792, False),
-            "Buenos Aires": (-34.6037, -58.3816, False),
-            "Lima": (-12.0464, -77.0428, False),
-            "Bogota": (4.7110, -74.0721, False),
-            "Osaka": (34.6937, 135.5023, False),
-            "Riyadh": (24.7136, 46.6753, False),
-            "Nairobi": (-1.2921, 36.8219, False),
-            "Johannesburg": (-26.2041, 28.0473, False),
-            "Melbourne": (-37.8136, 144.9631, False),
-            "Auckland": (-36.8485, 174.7633, False),
-            "Warsaw": (52.2297, 21.0122, False),
-            "Lisbon": (38.7223, -9.1393, False),
-            "Athens": (37.9838, 23.7275, False),
-            "Prague": (50.0755, 14.4378, False),
-            "Vienna": (48.2082, 16.3738, False),
-            "Stockholm": (59.3293, 18.0686, False),
-            "Oslo": (59.9139, 10.7522, False),
-            "Copenhagen": (55.6761, 12.5683, False),
-            "Zurich": (47.3769, 8.5417, False),
-            "Munich": (48.1351, 11.5820, False),
+            "London": self._location_details("London", 51.5074, -0.1278, False, "GB", "United Kingdom", "Europe", "Europe/London"),
+            "Paris": self._location_details("Paris", 48.8566, 2.3522, False, "FR", "France", "Europe", "Europe/Paris"),
+            "Tokyo": self._location_details("Tokyo", 35.6762, 139.6503, False, "JP", "Japan", "Asia", "Asia/Tokyo"),
+            "Amsterdam": self._location_details("Amsterdam", 52.3676, 4.9041, False, "NL", "Netherlands", "Europe", "Europe/Amsterdam"),
+            "Hong Kong": self._location_details("Hong Kong", 22.3193, 114.1694, False, "HK", "Hong Kong", "Asia", "Asia/Hong_Kong"),
+            "Singapore": self._location_details("Singapore", 1.3521, 103.8198, False, "SG", "Singapore", "Asia", "Asia/Singapore"),
+            "Sydney": self._location_details("Sydney", -33.8688, 151.2093, False, "AU", "Australia", "Oceania", "Australia/Sydney"),
+            "Berlin": self._location_details("Berlin", 52.5200, 13.4050, False, "DE", "Germany", "Europe", "Europe/Berlin"),
+            "Toronto": self._location_details("Toronto", 43.6532, -79.3832, False, "CA", "Canada", "North America", "America/Toronto"),
+            "Dubai": self._location_details("Dubai", 25.2048, 55.2708, False, "AE", "United Arab Emirates", "Asia", "Asia/Dubai"),
+            "Mumbai": self._location_details("Mumbai", 19.0760, 72.8777, False, "IN", "India", "Asia", "Asia/Kolkata"),
+            "Delhi": self._location_details("Delhi", 28.6139, 77.2090, False, "IN", "India", "Asia", "Asia/Kolkata"),
+            "Beijing": self._location_details("Beijing", 39.9042, 116.4074, False, "CN", "China", "Asia", "Asia/Shanghai"),
+            "Seoul": self._location_details("Seoul", 37.5665, 126.9780, False, "KR", "South Korea", "Asia", "Asia/Seoul"),
+            "Madrid": self._location_details("Madrid", 40.4168, -3.7038, False, "ES", "Spain", "Europe", "Europe/Madrid"),
+            "Rome": self._location_details("Rome", 41.9028, 12.4964, False, "IT", "Italy", "Europe", "Europe/Rome"),
+            "Taipei": self._location_details("Taipei", 25.0330, 121.5654, False, "TW", "Taiwan", "Asia", "Asia/Taipei"),
+            "Shenzhen": self._location_details("Shenzhen", 22.5431, 114.0579, False, "CN", "China", "Asia", "Asia/Shanghai"),
+            "Wuhan": self._location_details("Wuhan", 30.5928, 114.3055, False, "CN", "China", "Asia", "Asia/Shanghai"),
+            "Sao Paulo": self._location_details("Sao Paulo", -23.5505, -46.6333, False, "BR", "Brazil", "South America", "America/Sao_Paulo"),
+            "Istanbul": self._location_details("Istanbul", 41.0082, 28.9784, False, "TR", "Turkey", "Europe", "Europe/Istanbul"),
+            "Shanghai": self._location_details("Shanghai", 31.2304, 121.4737, False, "CN", "China", "Asia", "Asia/Shanghai"),
+            "Chongqing": self._location_details("Chongqing", 29.4316, 106.9123, False, "CN", "China", "Asia", "Asia/Shanghai"),
+            "Helsinki": self._location_details("Helsinki", 60.1699, 24.9384, False, "FI", "Finland", "Europe", "Europe/Helsinki"),
+            "Moscow": self._location_details("Moscow", 55.7558, 37.6173, False, "RU", "Russia", "Europe", "Europe/Moscow"),
+            "Bangkok": self._location_details("Bangkok", 13.7563, 100.5018, False, "TH", "Thailand", "Asia", "Asia/Bangkok"),
+            "Jakarta": self._location_details("Jakarta", -6.2088, 106.8456, False, "ID", "Indonesia", "Asia", "Asia/Jakarta"),
+            "Mexico City": self._location_details("Mexico City", 19.4326, -99.1332, False, "MX", "Mexico", "North America", "America/Mexico_City"),
+            "Cairo": self._location_details("Cairo", 30.0444, 31.2357, False, "EG", "Egypt", "Africa", "Africa/Cairo"),
+            "Lagos": self._location_details("Lagos", 6.5244, 3.3792, False, "NG", "Nigeria", "Africa", "Africa/Lagos"),
+            "Buenos Aires": self._location_details("Buenos Aires", -34.6037, -58.3816, False, "AR", "Argentina", "South America", "America/Argentina/Buenos_Aires"),
+            "Lima": self._location_details("Lima", -12.0464, -77.0428, False, "PE", "Peru", "South America", "America/Lima"),
+            "Bogota": self._location_details("Bogota", 4.7110, -74.0721, False, "CO", "Colombia", "South America", "America/Bogota"),
+            "Osaka": self._location_details("Osaka", 34.6937, 135.5023, False, "JP", "Japan", "Asia", "Asia/Tokyo"),
+            "Riyadh": self._location_details("Riyadh", 24.7136, 46.6753, False, "SA", "Saudi Arabia", "Asia", "Asia/Riyadh"),
+            "Nairobi": self._location_details("Nairobi", -1.2921, 36.8219, False, "KE", "Kenya", "Africa", "Africa/Nairobi"),
+            "Johannesburg": self._location_details("Johannesburg", -26.2041, 28.0473, False, "ZA", "South Africa", "Africa", "Africa/Johannesburg"),
+            "Melbourne": self._location_details("Melbourne", -37.8136, 144.9631, False, "AU", "Australia", "Oceania", "Australia/Melbourne"),
+            "Auckland": self._location_details("Auckland", -36.8485, 174.7633, False, "NZ", "New Zealand", "Oceania", "Pacific/Auckland"),
+            "Warsaw": self._location_details("Warsaw", 52.2297, 21.0122, False, "PL", "Poland", "Europe", "Europe/Warsaw"),
+            "Lisbon": self._location_details("Lisbon", 38.7223, -9.1393, False, "PT", "Portugal", "Europe", "Europe/Lisbon"),
+            "Athens": self._location_details("Athens", 37.9838, 23.7275, False, "GR", "Greece", "Europe", "Europe/Athens"),
+            "Prague": self._location_details("Prague", 50.0755, 14.4378, False, "CZ", "Czech Republic", "Europe", "Europe/Prague"),
+            "Vienna": self._location_details("Vienna", 48.2082, 16.3738, False, "AT", "Austria", "Europe", "Europe/Vienna"),
+            "Stockholm": self._location_details("Stockholm", 59.3293, 18.0686, False, "SE", "Sweden", "Europe", "Europe/Stockholm"),
+            "Oslo": self._location_details("Oslo", 59.9139, 10.7522, False, "NO", "Norway", "Europe", "Europe/Oslo"),
+            "Copenhagen": self._location_details("Copenhagen", 55.6761, 12.5683, False, "DK", "Denmark", "Europe", "Europe/Copenhagen"),
+            "Zurich": self._location_details("Zurich", 47.3769, 8.5417, False, "CH", "Switzerland", "Europe", "Europe/Zurich"),
+            "Munich": self._location_details("Munich", 48.1351, 11.5820, False, "DE", "Germany", "Europe", "Europe/Berlin"),
         }
 
         blocked_locations = {
@@ -441,7 +441,7 @@ class MarketClient:
         Attempt to extract a city/place name from the question and geocode it
         using Open-Meteo's free geocoding API (no key required).
 
-        Returns (lat, lon, is_us) or None if nothing found.
+        Returns rich location metadata or None if nothing found.
         """
         # Try to extract a capitalized place name from the question
         # Pattern: look for capitalized words that could be city names
@@ -478,7 +478,7 @@ class MarketClient:
             if candidate in self.geocode_cache:
                 cached = self.geocode_cache[candidate]
                 if cached is not None:
-                    print(f"[MARKETS]   [GEOCODE] Cache hit: '{candidate}' -> ({cached[0]}, {cached[1]})")
+                    print(f"[MARKETS]   [GEOCODE] Cache hit: '{candidate}' -> ({cached['lat']}, {cached['lon']})")
                     return cached
                 continue
 
@@ -495,7 +495,7 @@ class MarketClient:
     def _geocode_city(self, city_name):
         """
         Geocode a city name using Open-Meteo's free geocoding API.
-        Returns (lat, lon, is_us) or None.
+        Returns rich location metadata or None.
         """
         try:
             url = "https://geocoding-api.open-meteo.com/v1/search"
@@ -525,11 +525,80 @@ class MarketClient:
 
             print(f"[MARKETS]   [GEOCODE] Resolved '{city_name}' -> ({lat}, {lon}), "
                   f"country={top.get('country', '?')}, is_us={is_us}")
-            return (lat, lon, is_us)
+            return self._location_details(
+                top.get("name") or city_name,
+                lat,
+                lon,
+                is_us,
+                country,
+                top.get("country", ""),
+                self._country_to_continent(country),
+                top.get("timezone"),
+            )
 
         except Exception as e:
             print(f"[MARKETS]   [GEOCODE] Failed for '{city_name}': {e}")
             return None
+
+    def _location_details(self, city, lat, lon, is_us, country_code, country, continent, timezone_name):
+        return {
+            "city": city,
+            "lat": lat,
+            "lon": lon,
+            "is_us": is_us,
+            "country_code": country_code,
+            "country": country,
+            "continent": continent,
+            "timezone": timezone_name or "UTC",
+        }
+
+    def _country_to_continent(self, country_code):
+        code = (country_code or "").upper()
+        continent_map = {
+            "US": "North America",
+            "CA": "North America",
+            "MX": "North America",
+            "AR": "South America",
+            "BR": "South America",
+            "CO": "South America",
+            "PE": "South America",
+            "GB": "Europe",
+            "FR": "Europe",
+            "NL": "Europe",
+            "DE": "Europe",
+            "ES": "Europe",
+            "IT": "Europe",
+            "FI": "Europe",
+            "RU": "Europe",
+            "PL": "Europe",
+            "PT": "Europe",
+            "GR": "Europe",
+            "CZ": "Europe",
+            "AT": "Europe",
+            "SE": "Europe",
+            "NO": "Europe",
+            "DK": "Europe",
+            "CH": "Europe",
+            "TR": "Europe",
+            "AE": "Asia",
+            "IN": "Asia",
+            "CN": "Asia",
+            "KR": "Asia",
+            "TW": "Asia",
+            "HK": "Asia",
+            "SG": "Asia",
+            "TH": "Asia",
+            "ID": "Asia",
+            "JP": "Asia",
+            "SA": "Asia",
+            "AU": "Oceania",
+            "NZ": "Oceania",
+            "EG": "Africa",
+            "NG": "Africa",
+            "KE": "Africa",
+            "ZA": "Africa",
+        }
+        return continent_map.get(code, "Unknown")
 
 
 if __name__ == "__main__":

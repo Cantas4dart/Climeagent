@@ -14,11 +14,17 @@ class WeatherClient:
             points_url = f"https://api.weather.gov/points/{lat},{lon}"
             res = requests.get(points_url, headers=self.user_agent)
             res.raise_for_status()
-            forecast_url = res.json()["properties"]["forecastHourly"]
-            
+            points_payload = res.json().get("properties", {})
+            forecast_url = points_payload["forecastHourly"]
+            timezone_name = points_payload.get("timeZone")
+             
             res = requests.get(forecast_url, headers=self.user_agent)
             res.raise_for_status()
-            return res.json()["properties"]["periods"]
+            return {
+                "source": "noaa",
+                "timezone": timezone_name,
+                "hourly_periods": res.json()["properties"]["periods"],
+            }
         except Exception as e:
             print(f"Error fetching NOAA forecast: {e}")
             return None
@@ -37,7 +43,13 @@ class WeatherClient:
             }
             res = requests.get(url, params=params, timeout=20)
             res.raise_for_status()
-            return res.json()["hourly"]
+            payload = res.json()
+            return {
+                "source": "open-meteo",
+                "timezone": payload.get("timezone"),
+                "utc_offset_seconds": payload.get("utc_offset_seconds"),
+                "hourly": payload.get("hourly", {}),
+            }
         except Exception as e:
             print(f"Error fetching Open-Meteo forecast: {e}")
             return None

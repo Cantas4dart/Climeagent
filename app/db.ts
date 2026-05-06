@@ -5,13 +5,14 @@ import { decryptSecret, encryptSecret, hasMasterKey, isEncryptedSecret } from ".
 export interface User {
   id: number;
   tg_id: string;
-  private_key: string;
-  api_key: string;
-  api_secret: string;
-  api_passphrase: string;
+  private_key: string | null;
+  api_key: string | null;
+  api_secret: string | null;
+  api_passphrase: string | null;
   funder_address: string | null;
   signature_type: number | null;
   trading_active: number;
+  paper_testing_active: number;
   risk_percent: number;
   max_trade_amount: number;
   auto_claim: number;
@@ -32,6 +33,7 @@ export interface Trade {
   entry_confidence: number | null;
   entry_spread: number | null;
   entry_regime: string | null;
+  learning_features: string | null;
   execution_status: "placing" | "submitted";
   order_id: string | null;
   position_closed: number;
@@ -44,6 +46,30 @@ export interface Trade {
   claimed: number;
   claim_tx: string | null;
   claimed_at: string | null;
+  feedback_exported_at: string | null;
+  timestamp: string;
+}
+
+export interface PaperTrade {
+  id: number;
+  market_id: string;
+  condition_id: string;
+  tg_id: string;
+  side: "YES" | "NO";
+  entry_price: number;
+  size: number;
+  entry_model_prob: number | null;
+  entry_market_prob: number | null;
+  entry_confidence: number | null;
+  entry_spread: number | null;
+  entry_regime: string | null;
+  learning_features: string | null;
+  settled: number;
+  outcome: number | null;
+  pnl: number | null;
+  settled_at: string | null;
+  alert_sent_at: string | null;
+  feedback_exported_at: string | null;
   timestamp: string;
 }
 
@@ -70,6 +96,7 @@ export class DBManager {
         funder_address TEXT,
         signature_type INTEGER,
         trading_active INTEGER DEFAULT 0,
+        paper_testing_active INTEGER DEFAULT 0,
         risk_percent REAL DEFAULT 1.0,
         max_trade_amount REAL DEFAULT 10.0,
         auto_claim INTEGER DEFAULT 1,
@@ -92,6 +119,7 @@ export class DBManager {
         entry_confidence REAL,
         entry_spread REAL,
         entry_regime TEXT,
+        learning_features TEXT,
         execution_status TEXT DEFAULT 'submitted',
         order_id TEXT,
         position_closed INTEGER DEFAULT 0,
@@ -104,6 +132,32 @@ export class DBManager {
         claimed INTEGER DEFAULT 0,
         claim_tx TEXT,
         claimed_at DATETIME,
+        feedback_exported_at DATETIME,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+
+    this.db.prepare(`
+      CREATE TABLE IF NOT EXISTS paper_trades (
+        id INTEGER PRIMARY KEY,
+        market_id TEXT,
+        condition_id TEXT,
+        tg_id TEXT,
+        side TEXT,
+        entry_price REAL,
+        size REAL,
+        entry_model_prob REAL,
+        entry_market_prob REAL,
+        entry_confidence REAL,
+        entry_spread REAL,
+        entry_regime TEXT,
+        learning_features TEXT,
+        settled INTEGER DEFAULT 0,
+        outcome INTEGER,
+        pnl REAL,
+        settled_at DATETIME,
+        alert_sent_at DATETIME,
+        feedback_exported_at DATETIME,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `).run();
@@ -115,6 +169,7 @@ export class DBManager {
     this.ensureTradeColumn("entry_confidence", "REAL");
     this.ensureTradeColumn("entry_spread", "REAL");
     this.ensureTradeColumn("entry_regime", "TEXT");
+    this.ensureTradeColumn("learning_features", "TEXT");
     this.ensureTradeColumn("execution_status", "TEXT DEFAULT 'submitted'");
     this.ensureTradeColumn("order_id", "TEXT");
     this.ensureTradeColumn("position_closed", "INTEGER DEFAULT 0");
@@ -124,11 +179,15 @@ export class DBManager {
     this.ensureTradeColumn("claimed", "INTEGER DEFAULT 0");
     this.ensureTradeColumn("claim_tx", "TEXT");
     this.ensureTradeColumn("claimed_at", "DATETIME");
+    this.ensureTradeColumn("feedback_exported_at", "DATETIME");
+    this.ensurePaperTradeColumn("alert_sent_at", "DATETIME");
     this.ensureUserColumn("funder_address", "TEXT");
     this.ensureUserColumn("signature_type", "INTEGER");
+    this.ensureUserColumn("paper_testing_active", "INTEGER DEFAULT 0");
     this.ensureUserColumn("auto_claim", "INTEGER DEFAULT 1");
     this.ensureUserColumn("max_open_positions", "INTEGER DEFAULT 10");
     this.ensureUniqueTradePerMarket();
+    this.ensureUniquePaperTradePerMarket();
   }
 
   private ensureTradeColumn(columnName: string, definition: string) {
@@ -147,7 +206,15 @@ export class DBManager {
     }
   }
 
-  private runAddColumn(tableName: "users" | "trades", columnName: string, definition: string) {
+  private ensurePaperTradeColumn(columnName: string, definition: string) {
+    const columns = this.db.prepare("PRAGMA table_info(paper_trades)").all() as Array<{ name: string }>;
+    const exists = columns.some((column) => column.name === columnName);
+    if (!exists) {
+      this.runAddColumn("paper_trades", columnName, definition);
+    }
+  }
+
+  private runAddColumn(tableName: "users" | "trades" | "paper_trades", columnName: string, definition: string) {
     try {
       this.db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`).run();
     } catch (e: any) {
@@ -174,6 +241,22 @@ export class DBManager {
     `).run();
   }
 
+  private ensureUniquePaperTradePerMarket() {
+    this.db.prepare(`
+      DELETE FROM paper_trades
+      WHERE id NOT IN (
+        SELECT MIN(id)
+        FROM paper_trades
+        GROUP BY tg_id, market_id
+      )
+    `).run();
+
+    this.db.prepare(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trades_unique_user_market
+      ON paper_trades (tg_id, market_id)
+    `).run();
+  }
+
   private cleanupLegacyUnsignedSubmissions() {
     const result = this.db.prepare(`
       DELETE FROM trades
@@ -191,7 +274,7 @@ export class DBManager {
       throw new Error("MASTER_ENCRYPTION_KEY is not configured.");
     }
     const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO users (
+      INSERT INTO users (
         tg_id,
         private_key,
         api_key,
@@ -201,6 +284,13 @@ export class DBManager {
         signature_type
       )
       VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(tg_id) DO UPDATE SET
+        private_key = excluded.private_key,
+        api_key = excluded.api_key,
+        api_secret = excluded.api_secret,
+        api_passphrase = excluded.api_passphrase,
+        funder_address = excluded.funder_address,
+        signature_type = excluded.signature_type
     `);
     stmt.run(
       user.tg_id,
@@ -228,31 +318,38 @@ export class DBManager {
     if (
       (!hasMasterKey()) &&
       (
-        isEncryptedSecret(user.private_key) ||
-        isEncryptedSecret(user.api_key) ||
-        isEncryptedSecret(user.api_secret) ||
-        isEncryptedSecret(user.api_passphrase)
+        isEncryptedSecret(user.private_key || "") ||
+        isEncryptedSecret(user.api_key || "") ||
+        isEncryptedSecret(user.api_secret || "") ||
+        isEncryptedSecret(user.api_passphrase || "")
       )
     ) {
       throw new Error("MASTER_ENCRYPTION_KEY is required to unlock stored wallet credentials.");
     }
 
-    user.private_key = decryptSecret(user.private_key);
-    user.api_key = decryptSecret(user.api_key);
-    user.api_secret = decryptSecret(user.api_secret);
-    user.api_passphrase = decryptSecret(user.api_passphrase);
+    user.private_key = user.private_key ? decryptSecret(user.private_key) : null;
+    user.api_key = user.api_key ? decryptSecret(user.api_key) : null;
+    user.api_secret = user.api_secret ? decryptSecret(user.api_secret) : null;
+    user.api_passphrase = user.api_passphrase ? decryptSecret(user.api_passphrase) : null;
     return user;
   }
 
   getActiveUsers(): User[] {
-    const users = this.db.prepare("SELECT * FROM users WHERE trading_active = 1").all() as User[];
+    const users = this.db.prepare(`
+      SELECT * FROM users
+      WHERE trading_active = 1
+        AND private_key IS NOT NULL
+        AND api_key IS NOT NULL
+        AND api_secret IS NOT NULL
+        AND api_passphrase IS NOT NULL
+    `).all() as User[];
     if (
       !hasMasterKey() &&
       users.some((user) =>
-        isEncryptedSecret(user.private_key) ||
-        isEncryptedSecret(user.api_key) ||
-        isEncryptedSecret(user.api_secret) ||
-        isEncryptedSecret(user.api_passphrase)
+        isEncryptedSecret(user.private_key || "") ||
+        isEncryptedSecret(user.api_key || "") ||
+        isEncryptedSecret(user.api_secret || "") ||
+        isEncryptedSecret(user.api_passphrase || "")
       )
     ) {
       throw new Error("MASTER_ENCRYPTION_KEY is required to unlock stored wallet credentials.");
@@ -260,15 +357,19 @@ export class DBManager {
 
     return users.map((user) => ({
       ...user,
-      private_key: decryptSecret(user.private_key),
-      api_key: decryptSecret(user.api_key),
-      api_secret: decryptSecret(user.api_secret),
-      api_passphrase: decryptSecret(user.api_passphrase),
+      private_key: user.private_key ? decryptSecret(user.private_key) : null,
+      api_key: user.api_key ? decryptSecret(user.api_key) : null,
+      api_secret: user.api_secret ? decryptSecret(user.api_secret) : null,
+      api_passphrase: user.api_passphrase ? decryptSecret(user.api_passphrase) : null,
     }));
   }
 
   updateTradingStatus(tgId: string, active: boolean) {
     this.db.prepare("UPDATE users SET trading_active = ? WHERE tg_id = ?").run(active ? 1 : 0, tgId);
+  }
+
+  updatePaperTestingStatus(tgId: string, active: boolean) {
+    this.db.prepare("UPDATE users SET paper_testing_active = ? WHERE tg_id = ?").run(active ? 1 : 0, tgId);
   }
 
   updateRisk(tgId: string, risk: number) {
@@ -287,8 +388,18 @@ export class DBManager {
     this.db.prepare("UPDATE users SET max_open_positions = ? WHERE tg_id = ?").run(maxOpenPositions, tgId);
   }
 
-  removeUser(tgId: string) {
-    this.db.prepare("DELETE FROM users WHERE tg_id = ?").run(tgId);
+  clearUserWallet(tgId: string) {
+    this.db.prepare(`
+      UPDATE users
+      SET private_key = NULL,
+          api_key = NULL,
+          api_secret = NULL,
+          api_passphrase = NULL,
+          funder_address = NULL,
+          signature_type = NULL,
+          trading_active = 0
+      WHERE tg_id = ?
+    `).run(tgId);
   }
 
   maybeMigratePlaintextSecrets() {
@@ -348,6 +459,7 @@ export class DBManager {
     entry_confidence?: number | null,
     entry_spread?: number | null,
     entry_regime?: string | null,
+    learning_features?: string | null,
   }) {
     const stmt = this.db.prepare(`
       INSERT OR IGNORE INTO trades (
@@ -363,9 +475,10 @@ export class DBManager {
         entry_confidence,
         entry_spread,
         entry_regime,
+        learning_features,
         execution_status
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'placing')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'placing')
     `);
     return stmt.run(
       trade.market_id,
@@ -379,7 +492,8 @@ export class DBManager {
       trade.entry_market_prob ?? null,
       trade.entry_confidence ?? null,
       trade.entry_spread ?? null,
-      trade.entry_regime ?? null
+      trade.entry_regime ?? null,
+      trade.learning_features ?? null
     );
   }
 
@@ -405,6 +519,60 @@ export class DBManager {
   hasTraded(tgId: string, marketId: string) {
     const result = this.db.prepare(
       "SELECT id FROM trades WHERE tg_id = ? AND market_id = ? LIMIT 1"
+    ).get(tgId, marketId);
+    return !!result;
+  }
+
+  reservePaperTrade(trade: {
+    market_id: string,
+    condition_id: string,
+    tg_id: string,
+    side: "YES" | "NO",
+    entry_price: number,
+    size: number,
+    entry_model_prob?: number | null,
+    entry_market_prob?: number | null,
+    entry_confidence?: number | null,
+    entry_spread?: number | null,
+    entry_regime?: string | null,
+    learning_features?: string | null,
+  }) {
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO paper_trades (
+        market_id,
+        condition_id,
+        tg_id,
+        side,
+        entry_price,
+        size,
+        entry_model_prob,
+        entry_market_prob,
+        entry_confidence,
+        entry_spread,
+        entry_regime,
+        learning_features
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    return stmt.run(
+      trade.market_id,
+      trade.condition_id,
+      trade.tg_id,
+      trade.side,
+      trade.entry_price,
+      trade.size,
+      trade.entry_model_prob ?? null,
+      trade.entry_market_prob ?? null,
+      trade.entry_confidence ?? null,
+      trade.entry_spread ?? null,
+      trade.entry_regime ?? null,
+      trade.learning_features ?? null
+    );
+  }
+
+  hasPaperTrade(tgId: string, marketId: string) {
+    const result = this.db.prepare(
+      "SELECT id FROM paper_trades WHERE tg_id = ? AND market_id = ? LIMIT 1"
     ).get(tgId, marketId);
     return !!result;
   }
@@ -444,6 +612,14 @@ export class DBManager {
     `).all() as Trade[];
   }
 
+  getUnsettledPaperTrades(): PaperTrade[] {
+    return this.db.prepare(`
+      SELECT * FROM paper_trades
+      WHERE settled = 0
+      ORDER BY timestamp ASC
+    `).all() as PaperTrade[];
+  }
+
   recordTradeExit(tradeId: number, remainingSize: number, exitPrice: number | null, exitReason: string, fullyClosed: boolean) {
     this.db.prepare(`
       UPDATE trades
@@ -457,8 +633,92 @@ export class DBManager {
   }
 
   markSettled(tradeId: number, outcome: number, pnl: number) {
-    this.db.prepare("UPDATE trades SET settled = 1, outcome = ?, pnl = ? WHERE id = ?")
-      .run(outcome, pnl, tradeId);
+    this.db.prepare(`
+      UPDATE trades
+      SET settled = 1,
+          outcome = ?,
+          pnl = ?,
+          position_closed = 1,
+          remaining_size = 0,
+          exit_reason = COALESCE(exit_reason, 'settled'),
+          exited_at = COALESCE(exited_at, CURRENT_TIMESTAMP)
+      WHERE id = ?
+    `).run(outcome, pnl, tradeId);
+  }
+
+  getStaleOpenTrades(): Trade[] {
+    return this.db.prepare(`
+      SELECT * FROM trades
+      WHERE settled = 0
+        AND position_closed = 0
+        AND execution_status = 'submitted'
+        AND COALESCE(remaining_size, size) > 0
+      ORDER BY timestamp ASC
+    `).all() as Trade[];
+  }
+
+  getSettledTradesMissingFeedback(): Trade[] {
+    return this.db.prepare(`
+      SELECT * FROM trades
+      WHERE settled = 1
+        AND feedback_exported_at IS NULL
+        AND learning_features IS NOT NULL
+      ORDER BY id ASC
+    `).all() as Trade[];
+  }
+
+  getSettledPaperTradesMissingFeedback(): PaperTrade[] {
+    return this.db.prepare(`
+      SELECT * FROM paper_trades
+      WHERE settled = 1
+        AND feedback_exported_at IS NULL
+        AND learning_features IS NOT NULL
+      ORDER BY id ASC
+    `).all() as PaperTrade[];
+  }
+
+  getSettledPaperTradesPendingAlert(): PaperTrade[] {
+    return this.db.prepare(`
+      SELECT * FROM paper_trades
+      WHERE settled = 1
+        AND alert_sent_at IS NULL
+      ORDER BY id ASC
+    `).all() as PaperTrade[];
+  }
+
+  markFeedbackExported(tradeId: number) {
+    this.db.prepare(`
+      UPDATE trades
+      SET feedback_exported_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(tradeId);
+  }
+
+  markPaperFeedbackExported(tradeId: number) {
+    this.db.prepare(`
+      UPDATE paper_trades
+      SET feedback_exported_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(tradeId);
+  }
+
+  markPaperAlertSent(tradeId: number) {
+    this.db.prepare(`
+      UPDATE paper_trades
+      SET alert_sent_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(tradeId);
+  }
+
+  markPaperTradeSettled(tradeId: number, outcome: number, pnl: number) {
+    this.db.prepare(`
+      UPDATE paper_trades
+      SET settled = 1,
+          outcome = ?,
+          pnl = ?,
+          settled_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(outcome, pnl, tradeId);
   }
 
   getClaimableTrades(tgId: string): Trade[] {
@@ -522,6 +782,54 @@ export class DBManager {
       pnl: pnl,
       winRate: winRate
     };
+  }
+
+  getPaperStats(tgId: string): {
+    total: number;
+    open: number;
+    settled: number;
+    wins: number;
+    losses: number;
+    pnl: number;
+    winRate: string;
+  } {
+    const trades = this.db.prepare(
+      "SELECT * FROM paper_trades WHERE tg_id = ?"
+    ).all(tgId) as PaperTrade[];
+
+    const open = trades.filter((t) => t.settled !== 1);
+    const settled = trades.filter((t) => t.settled === 1);
+    const wins = settled.filter((t) => t.outcome === 1);
+    const losses = settled.filter((t) => t.outcome === 0);
+    const pnl = settled.reduce((sum, t) => sum + (t.pnl || 0), 0);
+    const winRate = settled.length > 0 ? ((wins.length / settled.length) * 100).toFixed(1) : "0.0";
+
+    return {
+      total: trades.length,
+      open: open.length,
+      settled: settled.length,
+      wins: wins.length,
+      losses: losses.length,
+      pnl,
+      winRate,
+    };
+  }
+
+  getPaperTradesForUser(tgId: string): PaperTrade[] {
+    return this.db.prepare(
+      "SELECT * FROM paper_trades WHERE tg_id = ? ORDER BY timestamp DESC"
+    ).all(tgId) as PaperTrade[];
+  }
+
+  getPaperTestingUsers(): User[] {
+    const users = this.db.prepare("SELECT * FROM users WHERE paper_testing_active = 1").all() as User[];
+    return users.map((user) => ({
+      ...user,
+      private_key: null,
+      api_key: null,
+      api_secret: null,
+      api_passphrase: null,
+    }));
   }
 
   getAllActiveUserIds(): string[] {

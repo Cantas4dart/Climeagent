@@ -23,13 +23,12 @@ class TradingModel:
     EXTREME_EDGE_FLOOR = 0.15
     EXTREME_SPREAD_MAX = 0.18
     MIN_CONFIDENCE_SCORE = 0.80
-    SELECTIVE_CONFIDENCE_SCORE = 0.80
+    SELECTIVE_CONFIDENCE_SCORE = 0.85
     EXTREME_CONFIDENCE_SCORE = 0.90
-    PREFERRED_PRICE_LOW = 0.20
-    PREFERRED_PRICE_HIGH = 0.70
-    SELECTIVE_PRICE_LOW = 0.10
-    SELECTIVE_PRICE_HIGH = 0.90
-
+    PREFERRED_PRICE_LOW = 0.23
+    PREFERRED_PRICE_HIGH = 0.77
+    SELECTIVE_PRICE_LOW = 0.13
+    SELECTIVE_PRICE_HIGH = 0.87
     def __init__(self, risk_percent=0.01):
         self.risk_percent = risk_percent
 
@@ -138,8 +137,16 @@ class TradingModel:
 
         return avg_prob, spread, stats
 
-    def detect_regime(self, model_prob, spread, days_to_resolution):
+    def detect_regime(self, model_prob, spread, days_to_resolution, local_peak_stage=None):
         tail_confidence = max(model_prob, 1 - model_prob)
+
+        if days_to_resolution <= 0:
+            if local_peak_stage == self.REGIME_POST_PEAK:
+                return self.REGIME_POST_PEAK
+            if local_peak_stage == self.REGIME_NEAR_PEAK:
+                return self.REGIME_NEAR_PEAK
+            if local_peak_stage == self.REGIME_PRE_PEAK and spread > 0.05 and tail_confidence < 0.94:
+                return self.REGIME_NEAR_PEAK
 
         if days_to_resolution <= 1 and (spread <= 0.05 or tail_confidence >= 0.94):
             return self.REGIME_POST_PEAK
@@ -169,6 +176,11 @@ class TradingModel:
         return "extreme_tail"
 
     def _price_band(self, market_price):
+        """
+        Keep price-banding aligned with the intelligence metadata buckets so
+        model-side veto patterns and paper-trade review are speaking the same
+        language.
+        """
         if self.PREFERRED_PRICE_LOW <= market_price <= self.PREFERRED_PRICE_HIGH:
             return "preferred"
         if self.SELECTIVE_PRICE_LOW <= market_price <= self.SELECTIVE_PRICE_HIGH:
@@ -229,6 +241,80 @@ class TradingModel:
         score = (0.65 * edge_score) + (0.35 * spread_score) + regime_bonus - price_penalty
         return round(min(max(score, 0.0), 1.0), 3)
 
+    def _segment_confidence_floor(self, trade_side, regime, mode, price_band):
+        floor = {
+            "preferred": self.MIN_CONFIDENCE_SCORE,
+            "selective": self.SELECTIVE_CONFIDENCE_SCORE,
+            "extreme": self.EXTREME_CONFIDENCE_SCORE,
+        }[price_band]
+
+        if trade_side == "YES":
+            if regime == self.REGIME_POST_PEAK:
+                floor = max(floor, 0.95 if price_band == "preferred" else 0.98)
+            elif regime == self.REGIME_NEAR_PEAK:
+                floor = max(floor, 0.89 if price_band == "preferred" else 0.94)
+
+            if mode == "extreme_mispricing":
+                floor = max(floor, 0.97 if price_band == "preferred" else 0.99)
+        else:
+            if regime == self.REGIME_NEAR_PEAK and price_band == "preferred":
+                floor = max(floor, 0.84 if mode == "standard" else 0.86)
+            elif regime == self.REGIME_POST_PEAK and price_band == "preferred":
+                floor = max(floor, 0.82 if mode == "standard" else 0.88)
+            elif price_band == "selective":
+                floor = max(floor, 0.86 if mode == "standard" else 0.89)
+            elif regime == self.REGIME_POST_PEAK and mode == "extreme_mispricing":
+                floor = max(floor, 0.91)
+
+        return round(min(max(floor, 0.0), 0.995), 3)
+
+    def _segment_required_edge(self, base_required_edge, trade_side, regime, mode, price_band):
+        adjustment = 0.0
+
+        if trade_side == "YES":
+            if regime == self.REGIME_POST_PEAK:
+                adjustment += 0.03
+            elif regime == self.REGIME_NEAR_PEAK:
+                adjustment += 0.02
+
+            if mode == "extreme_mispricing":
+                adjustment += 0.04
+
+            if price_band == "selective":
+                adjustment += 0.03
+            elif price_band == "extreme":
+                adjustment += 0.05
+        else:
+            if regime == self.REGIME_NEAR_PEAK and price_band == "preferred":
+                adjustment -= 0.005 if mode == "standard" else 0.0
+            elif regime == self.REGIME_POST_PEAK and price_band == "preferred" and mode == "standard":
+                adjustment += 0.01
+
+            if price_band == "selective":
+                adjustment += 0.01
+            elif price_band == "extreme":
+                adjustment += 0.02
+
+        return round(max(0.04, base_required_edge + adjustment), 4)
+
+    def _segment_spread_cap(self, base_spread_limit, trade_side, regime, mode, price_band):
+        cap = base_spread_limit
+
+        if trade_side == "YES":
+            if regime == self.REGIME_POST_PEAK:
+                cap = min(cap, 0.05 if price_band == "preferred" else 0.03)
+            elif regime == self.REGIME_NEAR_PEAK and mode == "extreme_mispricing":
+                cap = min(cap, 0.08 if price_band == "preferred" else 0.05)
+        else:
+            if regime == self.REGIME_NEAR_PEAK and price_band == "preferred":
+                cap = min(cap, 0.10 if mode == "extreme_mispricing" else 0.08)
+            elif regime == self.REGIME_POST_PEAK and price_band == "preferred":
+                cap = min(cap, 0.11 if mode == "extreme_mispricing" else 0.09)
+            elif price_band == "selective":
+                cap = min(cap, 0.09 if mode == "extreme_mispricing" else 0.07)
+
+        return round(max(0.02, cap), 4)
+
     def _estimate_bust_risk(self, model_prob, spread, confidence_score, days_to_resolution, regime):
         regime_base = {
             self.REGIME_PRE_PEAK: 0.075,
@@ -278,10 +364,122 @@ class TradingModel:
     def get_edge(self, model_prob, market_price):
         return model_prob - market_price
 
+    def _temperature_yes_overconfidence_veto(self, adjusted_prob, market_context):
+        """
+        Stable model-side veto for recurring losing YES patterns from paper trades.
+        We do not ban YES globally; we only flip the specific configurations that
+        repeatedly failed:
+        - preferred pricing + 70-79% YES in near/post peak: 0/4 YES wins
+        - near_peak + selective pricing + >=70% YES: 0/4 YES wins
+        - near_peak + extreme pricing + >=60% YES: 0/2 YES wins, 0/3 overall
+        - post_peak + extreme pricing + >=50% YES: 0/3 YES wins
+        - post_peak + selective pricing + >=80% YES: 0/4 YES wins
+        - post_peak + preferred pricing + 40-49% YES: 0/2 YES wins
+        - near_peak + selective pricing + 30-39% YES: 0/2 YES wins
+        - post_peak + selective pricing + 20-29% YES: 0/2 YES wins
+        - post_peak + extreme pricing + 20-59% YES: 0/2 YES wins
+        """
+        target = (market_context or {}).get("target") or {}
+        regime = str((market_context or {}).get("regime") or "")
+        if not regime:
+            days_to_resolution = max(int((market_context or {}).get("days_to_resolution", 3)), 0)
+            regime = self.detect_regime(
+                adjusted_prob,
+                0.0,
+                days_to_resolution,
+                local_peak_stage=(market_context or {}).get("local_peak_stage"),
+            )
+        target_type = str(target.get("type") or "")
+        direction = str(target.get("direction") or "above")
+        market_price = float((market_context or {}).get("market_price", 0.5))
+        price_band = self._price_band(market_price)
+
+        if target_type != "threshold" or direction == "below":
+            return adjusted_prob, None
+
+        matched_pattern = None
+        if price_band == "preferred" and 0.70 <= adjusted_prob < 0.80 and regime in {
+            self.REGIME_NEAR_PEAK,
+            self.REGIME_POST_PEAK,
+        }:
+            matched_pattern = f"{regime}/preferred/70-79"
+        elif price_band == "preferred" and regime == self.REGIME_POST_PEAK and 0.40 <= adjusted_prob < 0.50:
+            matched_pattern = "post_peak/preferred/40-49"
+        elif price_band == "selective" and regime == self.REGIME_NEAR_PEAK and adjusted_prob >= 0.70:
+            matched_pattern = "near_peak/selective/70+"
+        elif price_band == "selective" and regime == self.REGIME_NEAR_PEAK and 0.30 <= adjusted_prob < 0.40:
+            matched_pattern = "near_peak/selective/30-39"
+        elif price_band == "selective" and regime == self.REGIME_POST_PEAK and 0.20 <= adjusted_prob < 0.30:
+            matched_pattern = "post_peak/selective/20-29"
+        elif price_band == "extreme" and regime == self.REGIME_NEAR_PEAK and adjusted_prob >= 0.60:
+            matched_pattern = "near_peak/extreme/60+"
+        elif price_band == "extreme" and regime == self.REGIME_POST_PEAK and 0.20 <= adjusted_prob < 0.60:
+            matched_pattern = "post_peak/extreme/20-59"
+        elif price_band == "extreme" and regime == self.REGIME_POST_PEAK and adjusted_prob >= 0.80:
+            matched_pattern = "post_peak/extreme/80+"
+        elif price_band == "selective" and regime == self.REGIME_POST_PEAK and adjusted_prob >= 0.80:
+            matched_pattern = "post_peak/selective/80+"
+
+        if not matched_pattern:
+            return adjusted_prob, None
+
+        flipped_prob = 1.0 - adjusted_prob
+        forced_no_prob = min(flipped_prob, max(market_price - 0.02, 0.01))
+        prob_bucket = f"{int(adjusted_prob * 10) * 10:02d}-{int(adjusted_prob * 10) * 10 + 9:02d}"
+        return forced_no_prob, (
+            f"YES veto applied for repeated losing pattern {matched_pattern}: "
+            f"threshold-above temperature YES in bucket {prob_bucket} is treated as NO"
+        )
+
+    def _temperature_no_overconfidence_veto(self, adjusted_prob, market_context):
+        """
+        Mirror the YES-side veto for recurring losing NO patterns from paper trades.
+        Current stable loser:
+        - post_peak + preferred pricing + 70-79% NO: 0/4 NO wins
+        """
+        target = (market_context or {}).get("target") or {}
+        regime = str((market_context or {}).get("regime") or "")
+        if not regime:
+            days_to_resolution = max(int((market_context or {}).get("days_to_resolution", 3)), 0)
+            regime = self.detect_regime(
+                adjusted_prob,
+                0.0,
+                days_to_resolution,
+                local_peak_stage=(market_context or {}).get("local_peak_stage"),
+            )
+        target_type = str(target.get("type") or "")
+        direction = str(target.get("direction") or "above")
+        market_price = float((market_context or {}).get("market_price", 0.5))
+        no_market_price = 1.0 - market_price
+        price_band = self._price_band(no_market_price)
+        no_prob = 1.0 - adjusted_prob
+
+        if target_type != "threshold" or direction == "below":
+            return adjusted_prob, None
+
+        matched_pattern = None
+        if price_band == "preferred" and regime == self.REGIME_POST_PEAK and 0.70 <= no_prob < 0.80:
+            matched_pattern = "post_peak/preferred/70-79"
+
+        if not matched_pattern:
+            return adjusted_prob, None
+
+        forced_yes_prob = max(adjusted_prob, min(market_price + 0.02, 0.99))
+        prob_bucket = f"{int(no_prob * 10) * 10:02d}-{int(no_prob * 10) * 10 + 9:02d}"
+        return forced_yes_prob, (
+            f"NO veto applied for repeated losing pattern {matched_pattern}: "
+            f"threshold-above temperature NO in bucket {prob_bucket} is treated as YES"
+        )
+
     def evaluate_market_opportunity(self, model_prob, spread, market_price, market_context=None):
         market_context = market_context or {}
         days_to_resolution = max(int(market_context.get("days_to_resolution", 3)), 0)
-        regime = self.detect_regime(model_prob, spread, days_to_resolution)
+        regime = self.detect_regime(
+            model_prob,
+            spread,
+            days_to_resolution,
+            local_peak_stage=market_context.get("local_peak_stage"),
+        )
 
         provisional_edge = self.get_edge(model_prob, market_price)
         provisional_mode = "extreme_mispricing" if abs(provisional_edge) >= self.EXTREME_EDGE_THRESHOLD else "standard"
@@ -297,21 +495,33 @@ class TradingModel:
             regime=regime,
         )
         adjusted_prob = self._apply_bust_risk(model_prob, bust_risk)
+        pre_veto_prob = adjusted_prob
+        pre_veto_edge = self.get_edge(pre_veto_prob, market_price)
+        veto_context = {
+            **market_context,
+            "regime": regime,
+            "market_price": market_price,
+        }
+        yes_veto_reason = None
+        no_veto_reason = None
+        if pre_veto_edge > 0:
+            adjusted_prob, yes_veto_reason = self._temperature_yes_overconfidence_veto(adjusted_prob, veto_context)
+        else:
+            adjusted_prob, no_veto_reason = self._temperature_no_overconfidence_veto(adjusted_prob, veto_context)
         edge = self.get_edge(adjusted_prob, market_price)
         abs_edge = abs(edge)
+        trade_side = "YES" if edge > 0 else "NO"
         mode = "extreme_mispricing" if abs_edge >= self.EXTREME_EDGE_THRESHOLD else "standard"
         confidence_score = self._confidence_score(abs_edge, spread, mode, regime, market_price)
 
         prob_floor, prob_ceiling = self.probability_bounds(regime)
-        spread_limit = self.spread_limit(regime)
-        required_edge, probability_region, price_band = self._required_edge(
+        base_spread_limit = self.spread_limit(regime)
+        base_required_edge, probability_region, price_band = self._required_edge(
             adjusted_prob, regime, market_price
         )
-        required_confidence = {
-            "preferred": self.MIN_CONFIDENCE_SCORE,
-            "selective": self.SELECTIVE_CONFIDENCE_SCORE,
-            "extreme": self.EXTREME_CONFIDENCE_SCORE,
-        }[price_band]
+        spread_limit = self._segment_spread_cap(base_spread_limit, trade_side, regime, mode, price_band)
+        required_edge = self._segment_required_edge(base_required_edge, trade_side, regime, mode, price_band)
+        required_confidence = self._segment_confidence_floor(trade_side, regime, mode, price_band)
 
         reasons = []
         if adjusted_prob < prob_floor:
@@ -345,14 +555,24 @@ class TradingModel:
             )
 
         should_trade = len(reasons) == 0
-        action = "BUY_YES" if edge > 0 else "BUY_NO"
+        action = "BUY_YES" if trade_side == "YES" else "BUY_NO"
         size_multiplier = self._size_multiplier(confidence_score, regime) if should_trade else 0.0
+        if should_trade:
+            if trade_side == "YES":
+                size_multiplier *= 0.72 if mode == "extreme_mispricing" else 0.82
+            elif regime == self.REGIME_NEAR_PEAK and price_band == "preferred":
+                size_multiplier *= 1.08
+            size_multiplier = round(size_multiplier, 2)
 
         print(
             f"[MODEL]   Regime={regime}, raw_prob={model_prob:.2%}, adjusted_prob={adjusted_prob:.2%}, "
             f"bust_risk={bust_risk:.2%}, edge={edge:.2%}, spread={spread:.2%}, confidence={confidence_score:.2f}, "
             f"trade={should_trade}"
         )
+        if yes_veto_reason:
+            print(f"[MODEL]   YES VETO: {yes_veto_reason}")
+        if no_veto_reason:
+            print(f"[MODEL]   NO VETO: {no_veto_reason}")
         for reason in reasons:
             print(f"[MODEL]   REJECT: {reason}")
 
@@ -365,8 +585,17 @@ class TradingModel:
             "spread": spread,
             "reasons": reasons,
             "regime": regime,
+            "local_peak_stage": market_context.get("local_peak_stage"),
+            "local_peak_stage_detail": market_context.get("local_peak_stage_detail"),
+            "local_hour": market_context.get("local_hour"),
+            "timezone": market_context.get("timezone"),
+            "utc_offset_hours": market_context.get("utc_offset_hours"),
+            "continent": market_context.get("continent"),
+            "city": market_context.get("city"),
             "days_to_resolution": days_to_resolution,
             "raw_model_prob": round(model_prob, 4),
+            "pre_yes_veto_prob": round(pre_veto_prob, 4),
+            "pre_pattern_veto_prob": round(pre_veto_prob, 4),
             "adjusted_model_prob": round(adjusted_prob, 4),
             "market_price": round(market_price, 4),
             "edge": round(edge, 4),
@@ -376,9 +605,14 @@ class TradingModel:
             "prob_floor": round(prob_floor, 4),
             "prob_ceiling": round(prob_ceiling, 4),
             "required_edge": round(required_edge, 4),
+            "base_required_edge": round(base_required_edge, 4),
             "probability_region": probability_region,
             "price_band": price_band,
             "required_confidence": round(required_confidence, 4),
+            "trade_side": trade_side,
+            "yes_veto_applied": bool(yes_veto_reason),
+            "no_veto_applied": bool(no_veto_reason),
+            "pattern_veto_applied": bool(yes_veto_reason or no_veto_reason),
         }
 
     def should_trade(self, edge, model_prob, conviction):

@@ -19,6 +19,7 @@ data/*.db
 data/*.db-journal
 data/*.sqlite
 data/*.json
+data/*.jsonl
 data/locks/
 !data/README.md
 

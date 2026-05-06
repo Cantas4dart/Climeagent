@@ -40,6 +40,9 @@ export class PolyMarketAPI {
   private funderAddress?: string;
   private signatureType?: number;
   private readonly usdcAddress = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+  private readonly pusdAddress = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+  private readonly collateralOnrampAddress = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
+  private readonly collateralOfframpAddress = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854";
   private readonly conditionalTokensAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
   constructor(
     creds: { key: string; secret: string; passphrase: string },
@@ -109,7 +112,7 @@ export class PolyMarketAPI {
     return this.funderAddress || this.getSignerAddress();
   }
 
-  async getWalletUsdcBalance(address: string) {
+  async getWalletPusdBalance(address: string) {
     const abi = parseAbi(["function balanceOf(address owner) view returns (uint256)"]);
     let lastError: any = null;
 
@@ -121,7 +124,7 @@ export class PolyMarketAPI {
         });
 
         return await publicClient.readContract({
-          address: this.usdcAddress as `0x${string}`,
+          address: this.pusdAddress as `0x${string}`,
           abi,
           functionName: "balanceOf",
           args: [address as `0x${string}`],
@@ -133,6 +136,10 @@ export class PolyMarketAPI {
     }
 
     throw lastError || new Error("All Polygon RPC endpoints failed.");
+  }
+
+  async getWalletUsdcBalance(address: string) {
+    return this.getWalletPusdBalance(address);
   }
 
   private getRelayerClient() {
@@ -173,7 +180,7 @@ export class PolyMarketAPI {
     throw new Error("Failed to fetch balance after retries");
   }
 
-  async approveUSDC() {
+  async approveCollateral() {
     const spenders = [
       "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045", // CTF
       "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", // Exchange
@@ -204,7 +211,7 @@ export class PolyMarketAPI {
       }
 
       const txs = spenders.map((spender) => ({
-        to: this.usdcAddress,
+        to: this.pusdAddress,
         data: encodeFunctionData({
           abi,
           functionName: "approve",
@@ -228,7 +235,7 @@ export class PolyMarketAPI {
     const hashes = [];
     for (const spender of spenders) {
       const hash = await walletClient.sendTransaction({
-        to: this.usdcAddress as `0x${string}`,
+        to: this.pusdAddress as `0x${string}`,
         data: encodeFunctionData({
           abi,
           functionName: "approve",
@@ -242,7 +249,11 @@ export class PolyMarketAPI {
     return hashes;
   }
 
-  async transferUsdcToFunder(amount: number) {
+  async approveUSDC() {
+    return this.approveCollateral();
+  }
+
+  async transferPusdToFunder(amount: number) {
     if (!this.funderAddress) {
       throw new Error("No funder address is configured for this user.");
     }
@@ -260,7 +271,7 @@ export class PolyMarketAPI {
     const amountUnits = parseUnits(String(amount), 6);
 
     return walletClient.sendTransaction({
-      to: this.usdcAddress as `0x${string}`,
+      to: this.pusdAddress as `0x${string}`,
       data: encodeFunctionData({
         abi,
         functionName: "transfer",
@@ -269,36 +280,14 @@ export class PolyMarketAPI {
     });
   }
 
+  async transferUsdcToFunder(amount: number) {
+    return this.transferPusdToFunder(amount);
+  }
+
   async getPositions(userAddress: string) {
     const url = `${this.dataApiUrl}/positions?user=${userAddress}`;
     const response = await axios.get(url);
     return response.data;
-  }
-
-  async getPositionLabel(tokenId: string) {
-    const cached = this.marketLookupCache.get(tokenId);
-    if (cached) return cached;
-
-    try {
-      const marketByTokenUrl = `https://clob.polymarket.com/markets-by-token/${tokenId}`;
-      const marketByTokenRes = await axios.get(marketByTokenUrl);
-      const marketByToken = marketByTokenRes.data;
-      const market = await this.getMarketByConditionId(marketByToken.condition_id);
-
-      const outcome =
-        tokenId === String(marketByToken.primary_token_id) ? "YES"
-        : tokenId === String(marketByToken.secondary_token_id) ? "NO"
-        : "POSITION";
-      const question = market?.question || market?.title || market?.slug || tokenId;
-      const label = `${question} [${outcome}]`;
-
-      this.marketLookupCache.set(tokenId, label);
-      return label;
-    } catch (e: any) {
-      console.warn(`[POLY] Failed to resolve token label for ${tokenId}: ${e.message}`);
-      this.marketLookupCache.set(tokenId, tokenId);
-      return tokenId;
-    }
   }
 
   async getOpenOrders(): Promise<OpenOrdersResponse> {
@@ -389,14 +378,32 @@ export class PolyMarketAPI {
 
   async getMarketByConditionId(conditionId: string) {
     const url = `https://gamma-api.polymarket.com/markets?conditionId=${conditionId}`;
-    const res = await axios.get(url);
-    return res.data[0];
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const res = await axios.get(url, { timeout: 20000 });
+        const markets = Array.isArray(res.data) ? res.data : [];
+        const exact = markets.find((market: any) => String(market?.conditionId || "").toLowerCase() === String(conditionId).toLowerCase());
+        return exact || markets[0];
+      } catch (e: any) {
+        if (attempt === 3) throw e;
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+      }
+    }
+    return null;
   }
 
   async getMarketById(marketId: string) {
     const url = `https://gamma-api.polymarket.com/markets/${marketId}`;
-    const res = await axios.get(url);
-    return res.data;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const res = await axios.get(url, { timeout: 20000 });
+        return res.data;
+      } catch (e: any) {
+        if (attempt === 3) throw e;
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+      }
+    }
+    return null;
   }
 
   async getPublicProfileByWallet(address: string) {
