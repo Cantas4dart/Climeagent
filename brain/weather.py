@@ -2,6 +2,11 @@ import requests
 import os
 from dotenv import load_dotenv
 
+try:
+    from .console import safe_print
+except ImportError:
+    from console import safe_print
+
 load_dotenv()
 
 class WeatherClient:
@@ -26,7 +31,7 @@ class WeatherClient:
                 "hourly_periods": res.json()["properties"]["periods"],
             }
         except Exception as e:
-            print(f"Error fetching NOAA forecast: {e}")
+            safe_print(f"Error fetching NOAA forecast: {e}")
             return None
 
     def get_open_meteo_forecast(self, lat, lon):
@@ -51,7 +56,7 @@ class WeatherClient:
                 "hourly": payload.get("hourly", {}),
             }
         except Exception as e:
-            print(f"Error fetching Open-Meteo forecast: {e}")
+            safe_print(f"Error fetching Open-Meteo forecast: {e}")
             return None
 
     def get_forecast(self, lat, lon, is_us=True):

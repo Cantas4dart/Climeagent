@@ -10,6 +10,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from signals import SignalGenerator
+from console import safe_print
 from singleton import acquire_process_lock
 
 SCAN_INTERVAL = 300  # 5 minutes
@@ -20,22 +21,22 @@ def main():
     if not release_lock:
         return
 
-    print("=" * 50)
-    print("  Blocky Brain - Calibrated Signal Engine v2")
-    print("=" * 50)
+    safe_print("=" * 50)
+    safe_print("  Blocky Brain - Calibrated Signal Engine v2")
+    safe_print("=" * 50)
 
     gen = SignalGenerator()
 
     while True:
         try:
-            print(f"\n[BRAIN] Starting market scan...")
+            safe_print(f"\n[BRAIN] Starting market scan...")
             gen.run()
-            print(f"[BRAIN] Scan complete. Sleeping {SCAN_INTERVAL}s...")
+            safe_print(f"[BRAIN] Scan complete. Sleeping {SCAN_INTERVAL}s...")
         except KeyboardInterrupt:
-            print("\n[BRAIN] Shutting down gracefully.")
+            safe_print("\n[BRAIN] Shutting down gracefully.")
             break
         except Exception as e:
-            print(f"[BRAIN ERROR] {e}")
+            safe_print(f"[BRAIN ERROR] {e}")
             import traceback
             traceback.print_exc()
 

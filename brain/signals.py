@@ -12,6 +12,12 @@ from weather import WeatherClient
 from markets import MarketClient
 from intelligence import WeatherIntelligenceAgent
 from model import TradingModel
+try:
+    from .console import safe_print
+except ImportError:
+    from console import safe_print
+DEGREE_OPTIONAL_PATTERN = f"(?:{chr(176)}\\s*)?"
+
 
 
 class SignalGenerator:
@@ -21,6 +27,8 @@ class SignalGenerator:
         self.model = TradingModel()
         self.intelligence = WeatherIntelligenceAgent()
         self.data_path = os.path.join(os.path.dirname(__file__), data_path)
+        self.forecast_history_path = os.path.join(os.path.dirname(__file__), "../data/forecast_history.json")
+        self.forecast_history = self._load_forecast_history()
         self.run_count = 0
         self.month_map = {
             "january": 1,
@@ -39,13 +47,14 @@ class SignalGenerator:
 
     def log(self, message=""):
         try:
-            print(message)
+            safe_print(message)
         except OSError:
             pass
 
     def run(self, event_filter=None, max_events=None):
         self.run_count += 1
         start_time = datetime.now()
+        self.forecast_history = self._load_forecast_history()
         self.log(f"\n[SIGNAL] {'='*55}")
         self.log(f"[SIGNAL]   SCAN #{self.run_count} -- {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         self.log(f"[SIGNAL] {'='*55}")
@@ -61,6 +70,9 @@ class SignalGenerator:
         self.log(f"\n[SIGNAL] --- Phase 1: Market Discovery ---")
         active_markets = self.markets.get_weather_markets()
         self.log(f"[SIGNAL] Found {len(active_markets)} active temperature markets after filtering.")
+        discovery_diagnostics = self._summarize_market_dates(active_markets)
+        if discovery_diagnostics["dates"]:
+            self.log(f"[SIGNAL] Discovery dates: {discovery_diagnostics['counts_by_date']}")
 
         if len(active_markets) == 0:
             self.log("[SIGNAL] WARNING: No temperature markets available. Nothing to analyze.")
@@ -69,6 +81,7 @@ class SignalGenerator:
             self.save_signals([], diagnostics={
                 "reason": "no_temperature_markets",
                 "raw_search_completed": True,
+                "discovery": discovery_diagnostics,
             })
             return
 
@@ -82,6 +95,7 @@ class SignalGenerator:
             "no_prices": 0,
             "sanity_blocked": 0,
             "no_edge": 0,
+            "forecast_timing": 0,
             "error": 0
         }
 
@@ -101,13 +115,10 @@ class SignalGenerator:
         for event_index, (event_label, markets) in enumerate(grouped_markets.items(), start=1):
             self.log(f"\n[SIGNAL] ===== Event {event_index}/{total_events}: {event_label} =====")
             ordered_markets = self.sort_markets_by_rung(markets)
-            event_signal_found = False
+            event_best_signal = None
+            event_best_score = None
 
             for rung_index, market in enumerate(ordered_markets, start=1):
-                if event_signal_found:
-                    self.log(f"[SIGNAL] | Event already has a valid rung. Moving to next ladder.")
-                    break
-
                 market_counter += 1
                 question = market.get("_display_question") or market.get("question", "Unknown")
                 market_id = market.get("id", "?")
@@ -170,11 +181,30 @@ class SignalGenerator:
                     self.log(f"[SIGNAL] | Forecasts: {forecast_data}")
 
                     market_context = self.build_market_context(location, forecast, market_date)
+                    market_context = self._enrich_market_context(
+                        market_context,
+                        forecast,
+                        forecast_data,
+                        target,
+                        market_date,
+                        is_us,
+                    )
                     self.log(
                         f"[SIGNAL] | Local Time: {market_context['local_now']} "
                         f"| Hour: {market_context['local_hour']} "
                         f"| Stage: {market_context['local_peak_stage_detail']}"
                     )
+                    self.log(
+                        f"[SIGNAL] | Drift: {market_context['forecast_revision_direction']} "
+                        f"({market_context['forecast_revision_delta']:+.2f}) | "
+                        f"Settlement Risk: {market_context['settlement_risk']:.2f}"
+                    )
+                    if market_context.get("resolution_station_name"):
+                        station_mode = "applied" if market_context.get("resolution_coordinates_applied") else "referenced"
+                        self.log(
+                            f"[SIGNAL] | Resolution Station: {market_context['resolution_station_name']} "
+                            f"({station_mode})"
+                        )
 
                     # Step 6: Calculate ensemble probability
                     avg_prob, spread, ensemble_stats = self.model.calculate_ensemble_probability(forecast_data, target)
@@ -230,6 +260,13 @@ class SignalGenerator:
                         "timezone": market_context["timezone"],
                         "continent": market_context["continent"],
                         "city": market_context["city"],
+                        "forecast_revision_delta": market_context["forecast_revision_delta"],
+                        "forecast_revision_volatility": market_context["forecast_revision_volatility"],
+                        "forecast_revision_direction": market_context["forecast_revision_direction"],
+                        "settlement_risk": market_context["settlement_risk"],
+                        "rounding_risk": market_context["rounding_risk"],
+                        "station_mismatch_risk": market_context["station_mismatch_risk"],
+                        "observation_progress": market_context["observation_progress"],
                     })
                     learned_prob = intelligence["decision_prob"]
                     self.log(
@@ -256,6 +293,15 @@ class SignalGenerator:
                             "utc_offset_hours": market_context["utc_offset_hours"],
                             "continent": market_context["continent"],
                             "city": market_context["city"],
+                            "temp_dispersion": market_context.get("temp_dispersion", 0.0),
+                            "calibration_buckets": market_context.get("calibration_buckets", {}),
+                            "forecast_revision_delta": market_context["forecast_revision_delta"],
+                            "forecast_revision_volatility": market_context["forecast_revision_volatility"],
+                            "forecast_revision_direction": market_context["forecast_revision_direction"],
+                            "settlement_risk": market_context["settlement_risk"],
+                            "rounding_risk": market_context["rounding_risk"],
+                            "station_mismatch_risk": market_context["station_mismatch_risk"],
+                            "observation_progress": market_context["observation_progress"],
                         }
                     )
                     self.log(
@@ -263,6 +309,7 @@ class SignalGenerator:
                         f"Bust Risk: {decision['bust_risk']:.2%}, Regime: {decision['regime']}"
                     )
                     self.log(f"[SIGNAL] | Edge: {decision['edge']:.2%} (abs: {decision['abs_edge']:.2%})")
+                    entry_timing_gate = self._entry_timing_gate(market_context, market_date)
                     learning_payload = {
                         **intelligence["training_payload"],
                         "meta": {
@@ -280,6 +327,13 @@ class SignalGenerator:
                             "local_date": market_context["local_date"],
                             "local_peak_stage": market_context["local_peak_stage"],
                             "local_peak_stage_detail": market_context["local_peak_stage_detail"],
+                            "forecast_revision_direction": market_context["forecast_revision_direction"],
+                            "resolution_source": market_context.get("resolution_source"),
+                            "resolution_station_name": market_context.get("resolution_station_name"),
+                            "resolution_station_url": market_context.get("resolution_station_url"),
+                            "resolution_coordinates_applied": bool(market_context.get("resolution_coordinates_applied")),
+                            "entry_timing_blocked": bool(entry_timing_gate["blocked"]),
+                            "entry_timing_reason": entry_timing_gate["reason"],
                         },
                         "decision": {
                             "action": decision["action"],
@@ -312,6 +366,19 @@ class SignalGenerator:
                         "local_hour": market_context["local_hour"],
                         "local_peak_stage": market_context["local_peak_stage"],
                         "local_peak_stage_detail": market_context["local_peak_stage_detail"],
+                        "forecast_revision_delta": round(market_context["forecast_revision_delta"], 4),
+                        "forecast_revision_volatility": round(market_context["forecast_revision_volatility"], 4),
+                        "forecast_revision_direction": market_context["forecast_revision_direction"],
+                        "settlement_risk": round(market_context["settlement_risk"], 4),
+                        "rounding_risk": round(market_context["rounding_risk"], 4),
+                        "station_mismatch_risk": round(market_context["station_mismatch_risk"], 4),
+                        "observation_progress": round(market_context["observation_progress"], 4),
+                        "resolution_source": market_context.get("resolution_source"),
+                        "resolution_station_name": market_context.get("resolution_station_name"),
+                        "resolution_station_url": market_context.get("resolution_station_url"),
+                        "resolution_coordinates_applied": bool(market_context.get("resolution_coordinates_applied")),
+                        "entry_timing_blocked": bool(entry_timing_gate["blocked"]),
+                        "entry_timing_reason": entry_timing_gate["reason"],
                         "raw_model_prob": round(avg_prob, 4),
                         "intelligence_prob": round(learned_prob, 4),
                         "adjusted_model_prob": round(decision["adjusted_model_prob"], 4),
@@ -345,14 +412,15 @@ class SignalGenerator:
                         "timestamp": str(datetime.now()),
                     })
 
-                    if decision["should_trade"]:
+                    can_trade_now = bool(decision["should_trade"]) and not entry_timing_gate["blocked"]
+                    if can_trade_now:
                         action = decision["action"]
                         entry_price = sanity["yes_price"] if action == "BUY_YES" else sanity["no_price"]
                         self.log(
                             f"[SIGNAL] | >>> TRADE SIGNAL: {action} | Mode: {decision['mode']} | "
                             f"Conf: {decision['confidence_score']:.2f} | Size x{decision['size_multiplier']:.2f} <<<"
                         )
-                        signals.append({
+                        candidate_signal = {
                             "market_id": market_id,
                             "condition_id": condition_id,
                             "question": question,
@@ -368,6 +436,19 @@ class SignalGenerator:
                             "local_hour": market_context["local_hour"],
                             "local_peak_stage": market_context["local_peak_stage"],
                             "local_peak_stage_detail": market_context["local_peak_stage_detail"],
+                            "forecast_revision_delta": round(market_context["forecast_revision_delta"], 4),
+                            "forecast_revision_volatility": round(market_context["forecast_revision_volatility"], 4),
+                            "forecast_revision_direction": market_context["forecast_revision_direction"],
+                            "settlement_risk": round(market_context["settlement_risk"], 4),
+                            "rounding_risk": round(market_context["rounding_risk"], 4),
+                            "station_mismatch_risk": round(market_context["station_mismatch_risk"], 4),
+                            "observation_progress": round(market_context["observation_progress"], 4),
+                            "resolution_source": market_context.get("resolution_source"),
+                            "resolution_station_name": market_context.get("resolution_station_name"),
+                            "resolution_station_url": market_context.get("resolution_station_url"),
+                            "resolution_coordinates_applied": bool(market_context.get("resolution_coordinates_applied")),
+                            "entry_timing_blocked": bool(entry_timing_gate["blocked"]),
+                            "entry_timing_reason": entry_timing_gate["reason"],
                             "target": target,
                             "forecast_data": {k: round(v, 2) for k, v in forecast_data.items()},
                             "avg_model_prob": round(avg_prob, 4),
@@ -404,14 +485,26 @@ class SignalGenerator:
                             "learning_features": learning_payload,
                             "market_snapshot": sanity["snapshot"],
                             "timestamp": str(datetime.now())
-                        })
-                        # Flush immediately so execution can pick up this signal before the scan finishes.
-                        self.flush_signals(signals, market_states)
-                        event_signal_found = True
+                        }
+                        candidate_score = self._signal_strength(candidate_signal)
+                        self.log(
+                            f"[SIGNAL] | Candidate strength: edge={candidate_signal['abs_edge']:.4f}, "
+                            f"conf={candidate_signal['confidence_score']:.4f}, "
+                            f"settlement_risk={candidate_signal['settlement_risk']:.4f}, "
+                            f"score={candidate_score}"
+                        )
+                        if event_best_score is None or candidate_score > event_best_score:
+                            event_best_signal = candidate_signal
+                            event_best_score = candidate_score
+                            self.log(f"[SIGNAL] | [BEST] Promoted current rung as top candidate for this ladder.")
                     else:
-                        reason = self._skip_reason(decision)
+                        if entry_timing_gate["blocked"] and decision["should_trade"]:
+                            reason = entry_timing_gate["reason"]
+                            skipped["forecast_timing"] += 1
+                        else:
+                            reason = self._skip_reason(decision)
+                            skipped["no_edge"] += 1
                         self.log(f"[SIGNAL] | [X] NO TRADE: {reason}")
-                        skipped["no_edge"] += 1
 
                 except Exception as e:
                     self.log(f"[SIGNAL] | ERROR processing market {market_id}: {e}")
@@ -426,6 +519,16 @@ class SignalGenerator:
                 self.flush_signals(signals, market_states)
                 self.log(f"[SIGNAL] +------------------------------------------")
 
+            if event_best_signal is not None:
+                signals.append(event_best_signal)
+                self.log(
+                    f"[SIGNAL] | Selected strongest rung for ladder: "
+                    f"{event_best_signal['action']} | {event_best_signal['question']}"
+                )
+                self.flush_signals(signals, market_states)
+            else:
+                self.log(f"[SIGNAL] | No valid trade candidate survived for this ladder.")
+
         # Summary
         elapsed = (datetime.now() - start_time).total_seconds()
         self.log(f"\n[SIGNAL] {'='*55}")
@@ -437,10 +540,12 @@ class SignalGenerator:
 
         self.save_signals(signals, diagnostics={
             "markets_found": len(active_markets),
+            "discovery": discovery_diagnostics,
             "skipped": skipped,
             "elapsed_seconds": round(elapsed, 1),
             "intelligence": intelligence_summary,
         }, market_states=market_states)
+        self._save_forecast_history()
 
     def _skip_reason(self, decision):
         """Human-readable reason for skipping a trade."""
@@ -448,6 +553,45 @@ class SignalGenerator:
         if not reasons:
             return "Filtered by risk controls"
         return "; ".join(reasons)
+
+    def _signal_strength(self, signal):
+        """
+        Rank sibling ladder candidates by edge quality first, then confidence and
+        execution cleanliness. Higher tuples win.
+        """
+        return (
+            float(signal.get("abs_edge", 0.0)),
+            float(signal.get("confidence_score", 0.0)),
+            float(signal.get("learning_confidence", 0.0)),
+            -float(signal.get("settlement_risk", 0.0)),
+            -float(signal.get("rounding_risk", 0.0)),
+            -float(signal.get("ensemble_spread", 0.0)),
+            -float(signal.get("entry_price", 1.0)),
+        )
+
+    def _summarize_market_dates(self, markets):
+        counts_by_date = {}
+        sample_events_by_date = {}
+
+        for market in markets:
+            question = market.get("_display_question") or market.get("question", "")
+            market_date = self.extract_market_date(question, market)
+            if not market_date:
+                continue
+
+            iso_date = market_date.isoformat()
+            counts_by_date[iso_date] = counts_by_date.get(iso_date, 0) + 1
+
+            event_label = question.split(" :: ")[0] if " :: " in question else question
+            samples = sample_events_by_date.setdefault(iso_date, [])
+            if event_label and event_label not in samples and len(samples) < 5:
+                samples.append(event_label)
+
+        return {
+            "dates": sorted(counts_by_date.keys()),
+            "counts_by_date": {key: counts_by_date[key] for key in sorted(counts_by_date.keys())},
+            "sample_events_by_date": {key: sample_events_by_date[key] for key in sorted(sample_events_by_date.keys())},
+        }
 
     def _run_market_sanity_checks(self, market, question, target, raw_prices):
         issues = []
@@ -528,7 +672,44 @@ class SignalGenerator:
             "official high temperature",
             "official low temperature",
         ]
-        return not any(term in rules_blob for term in clarity_terms)
+        if any(term in rules_blob for term in clarity_terms):
+            return False
+
+        return not self._is_standard_temperature_ladder(question, target)
+
+    def _is_standard_temperature_ladder(self, question, target):
+        """
+        Allow routine Polymarket temperature ladder rungs to pass even when the
+        market text omits older settlement wording like "rounded".
+        """
+        q_lower = (question or "").lower()
+        if not any(phrase in q_lower for phrase in ("highest temperature", "lowest temperature")):
+            return False
+
+        if not re.search(r'\bon\s+[a-z]+\s+\d{1,2}\b', q_lower):
+            return False
+
+        if target["type"] == "exact":
+            return bool(
+                re.search(
+                    rf'\b(?:be|hit|reach)\s+\d+(?:\.\d+)?\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c|degrees)\b',
+                    q_lower,
+                )
+            )
+
+        if target["type"] == "range":
+            return bool(
+                re.search(
+                    rf'\bbetween\s+\d+(?:\.\d+)?\s*(?:{DEGREE_OPTIONAL_PATTERN}(?:f|c)?)?\s*(?:-|and|to)\s*\d+(?:\.\d+)?',
+                    q_lower,
+                )
+                or re.search(
+                    rf'\d+(?:\.\d+)?\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c)?\s*(?:-|to)\s*\d+(?:\.\d+)?',
+                    q_lower,
+                )
+            )
+
+        return False
 
     def _extract_market_metric(self, market, keys):
         for key in keys:
@@ -560,7 +741,10 @@ class SignalGenerator:
         q_lower = question.lower()
 
         # 1. Range Pattern (e.g. "78-79F", "between 60 and 61", "60 to 61")
-        range_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:°\s*)?(?:f|c)?\s*(?:-|to)\s*(\d+(?:\.\d+)?)', q_lower)
+        range_match = re.search(
+            rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c)?\s*(?:-|to)\s*(\d+(?:\.\d+)?)',
+            q_lower,
+        )
         if range_match:
             low = float(range_match.group(1))
             high = float(range_match.group(2))
@@ -568,19 +752,45 @@ class SignalGenerator:
                 return {"type": "range", "low": low, "high": high}
 
         # 2. "between X and Y" pattern
-        between_match = re.search(r'between\s+(\d+(?:\.\d+)?)\s*(?:(?:°\s*)?(?:f|c)?)?\s+and\s+(\d+(?:\.\d+)?)', q_lower)
+        between_match = re.search(
+            rf'between\s+(\d+(?:\.\d+)?)\s*(?:{DEGREE_OPTIONAL_PATTERN}(?:f|c)?)?\s+and\s+(\d+(?:\.\d+)?)',
+            q_lower,
+        )
         if between_match:
             low = float(between_match.group(1))
             high = float(between_match.group(2))
             if low < high:
                 return {"type": "range", "low": low, "high": high}
 
-        # 3. Exact Pattern (e.g. "exactly 7C", "be exactly 7")
+        # 3. Threshold ladder phrasing (e.g. "72F or higher", "53F or below")
+        above_rung_match = re.search(
+            rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c|degrees)?\s+or higher\b',
+            q_lower,
+        )
+        if above_rung_match:
+            return {"type": "threshold", "direction": "above", "val": float(above_rung_match.group(1))}
+
+        below_rung_match = re.search(
+            rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c|degrees)?\s+or below\b',
+            q_lower,
+        )
+        if below_rung_match:
+            return {"type": "threshold", "direction": "below", "val": float(below_rung_match.group(1))}
+
+        # 4. Exact Pattern (e.g. "exactly 7C", "be exactly 7")
         exact_match = re.search(r'exactly\s+(\d+(?:\.\d+)?)', q_lower)
         if exact_match:
             return {"type": "exact", "val": float(exact_match.group(1))}
 
-        # 4. Threshold patterns
+        # 5. Exact settlement phrasing common in ladder rungs
+        exact_be_match = re.search(
+            rf'\b(?:be|hit|reach)\s+(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c|degrees)\b',
+            q_lower,
+        )
+        if exact_be_match:
+            return {"type": "exact", "val": float(exact_be_match.group(1))}
+
+        # 6. Threshold patterns
         above_match = re.search(r'(?:above|over|higher than|at least|exceed|>=)\s*(\d+(?:\.\d+)?)', q_lower)
         if above_match:
             return {"type": "threshold", "direction": "above", "val": float(above_match.group(1))}
@@ -589,12 +799,15 @@ class SignalGenerator:
         if below_match:
             return {"type": "threshold", "direction": "below", "val": float(below_match.group(1))}
 
-        # 5. Fallback: find a temperature number near F or C markers
-        temp_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:°\s*)?(?:f|c|degrees)', q_lower)
+        # 7. Fallback: find a temperature number near F or C markers
+        temp_match = re.search(
+            rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c|degrees)',
+            q_lower,
+        )
         if temp_match:
             return {"type": "threshold", "direction": "above", "val": float(temp_match.group(1))}
 
-        # 6. Last resort: any standalone number (less reliable)
+        # 8. Last resort: any standalone number (less reliable)
         any_num = re.search(r'(\d+)', question)
         if any_num:
             return {"type": "threshold", "direction": "above", "val": float(any_num.group(1))}
@@ -617,7 +830,7 @@ class SignalGenerator:
         question = market.get("question", "")
         combined = f"{display} {question}".lower()
 
-        below_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:°\s*)?(?:f|c)?\s+or below', combined)
+        below_match = re.search(rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c)?\s+or below', combined)
         if below_match:
             return (float(below_match.group(1)), -1)
 
@@ -625,11 +838,11 @@ class SignalGenerator:
         if range_match:
             return (float(range_match.group(1)), 0)
 
-        single_match = re.search(r'be\s+(\d+(?:\.\d+)?)\s*(?:°\s*)?(?:f|c)\b', combined)
+        single_match = re.search(rf'be\s+(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c)\b', combined)
         if single_match:
             return (float(single_match.group(1)), 1)
 
-        above_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:°\s*)?(?:f|c)?\s+or higher', combined)
+        above_match = re.search(rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c)?\s+or higher', combined)
         if above_match:
             return (float(above_match.group(1)), 2)
 
@@ -786,7 +999,109 @@ class SignalGenerator:
             "local_peak_stage": local_peak_stage,
             "local_peak_stage_detail": local_peak_stage_detail,
             "days_to_resolution": days_to_resolution,
+            "resolution_source": location.get("resolution_source"),
+            "resolution_station_name": location.get("resolution_station_name"),
+            "resolution_station_url": location.get("resolution_station_url"),
+            "resolution_station_city": location.get("resolution_station_city"),
+            "resolution_coordinates_applied": bool(location.get("resolution_coordinates_applied", False)),
         }
+
+    def _enrich_market_context(self, market_context, forecast, forecast_data, target, market_date, is_us):
+        history_key = self._forecast_history_key(market_context, market_date)
+        avg_forecast = sum(float(v) for v in forecast_data.values()) / max(len(forecast_data), 1)
+        history = self.forecast_history.get(history_key, [])
+        prior_values = [float(item.get("avg_forecast", avg_forecast)) for item in history if item.get("avg_forecast") is not None]
+        prior_avg = prior_values[-1] if prior_values else avg_forecast
+        revision_delta = avg_forecast - prior_avg
+        revision_volatility = 0.0
+        if prior_values:
+            revision_volatility = max(prior_values + [avg_forecast]) - min(prior_values + [avg_forecast])
+
+        forecast_revision_direction = "flat"
+        if revision_delta >= 0.35:
+            forecast_revision_direction = "up"
+        elif revision_delta <= -0.35:
+            forecast_revision_direction = "down"
+
+        target_val = float(target.get("val", avg_forecast)) if target.get("type") in {"threshold", "exact"} else avg_forecast
+        avg_distance = abs(avg_forecast - target_val)
+        station_mismatch_risk = 0.06 if is_us else 0.16
+        if len(forecast_data) <= 1:
+            station_mismatch_risk += 0.05
+        if market_context["days_to_resolution"] == 0 and market_context["local_hour"] < 11:
+            station_mismatch_risk += 0.04
+
+        rounding_risk = 0.0
+        if target.get("type") == "threshold":
+            rounding_risk = max(0.0, 1.0 - min(avg_distance / 1.0, 1.0)) * 0.22
+        elif target.get("type") in {"exact", "range"}:
+            rounding_risk = 0.18
+
+        observation_progress = self._observation_progress(market_context)
+        settlement_risk = min(
+            0.95,
+            station_mismatch_risk
+            + rounding_risk
+            + min(revision_volatility / 3.0, 0.18)
+            + ((1.0 - observation_progress) * 0.14),
+        )
+
+        # Calculate temperature dispersion (std dev of forecasts)
+        if forecast_data and len(forecast_data) > 1:
+            forecasts = [float(v) for v in forecast_data.values()]
+            mean_forecast = sum(forecasts) / len(forecasts)
+            variance = sum((x - mean_forecast) ** 2 for x in forecasts) / len(forecasts)
+            temp_dispersion = variance ** 0.5
+        else:
+            temp_dispersion = 0.0
+
+        history.append({
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "avg_forecast": round(avg_forecast, 4),
+            "forecast_revision_delta": round(revision_delta, 4),
+        })
+        self.forecast_history[history_key] = history[-12:]
+
+        return {
+            **market_context,
+            "forecast_revision_delta": revision_delta,
+            "forecast_revision_volatility": revision_volatility,
+            "forecast_revision_direction": forecast_revision_direction,
+            "station_mismatch_risk": station_mismatch_risk,
+            "rounding_risk": rounding_risk,
+            "settlement_risk": settlement_risk,
+            "observation_progress": observation_progress,
+            "temp_dispersion": temp_dispersion,
+            "calibration_buckets": self.intelligence.state.get("calibration_buckets", {}),
+        }
+
+    def _observation_progress(self, market_context):
+        if market_context["days_to_resolution"] > 0:
+            return 0.15
+        if market_context["local_peak_stage"] == "pre_peak":
+            return 0.30 if market_context["local_hour"] < 9 else 0.45
+        if market_context["local_peak_stage"] == "near_peak":
+            return 0.70
+        return 0.90
+
+    def _forecast_history_key(self, market_context, market_date):
+        return f"{market_context.get('city','?')}|{market_context.get('country_code','?')}|{market_date.isoformat()}"
+
+    def _load_forecast_history(self):
+        try:
+            with open(self.forecast_history_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_forecast_history(self):
+        try:
+            os.makedirs(os.path.dirname(self.forecast_history_path), exist_ok=True)
+            with open(self.forecast_history_path, "w", encoding="utf-8") as handle:
+                json.dump(self.forecast_history, handle, indent=2)
+        except OSError:
+            pass
 
     def _resolve_timezone_name(self, location, forecast):
         if isinstance(forecast, dict):
@@ -839,6 +1154,19 @@ class SignalGenerator:
             return max(fallback_values)
 
         return None
+
+    def _entry_timing_gate(self, market_context, market_date):
+        if (
+            market_context.get("country_code") == "US"
+            and market_context.get("local_date") == market_date.isoformat()
+            and int(market_context.get("local_hour", -1)) < 8
+        ):
+            timezone_name = market_context.get("timezone") or "local timezone"
+            return {
+                "blocked": True,
+                "reason": f"U.S. same-day entries wait until 8:00 AM local time ({timezone_name}) for forecast stability.",
+            }
+        return {"blocked": False, "reason": ""}
 
     def save_signals(self, signals, diagnostics=None, market_states=None):
         self._write_signal_store(signals, diagnostics=diagnostics, market_states=market_states, log=True)

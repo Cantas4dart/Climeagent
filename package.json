@@ -2,34 +2,14 @@
   "name": "blocky-polymarket",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
   "scripts": {
-    "start": "concurrently \"python -u brain/main.py\" \"ts-node -T app/bot.ts\" \"ts-node -T app/executor.ts\" \"ts-node -T app/settlement.ts\"",
-    "typecheck": "node ./node_modules/typescript/lib/tsc.js --noEmit"
+    "start": "concurrently \"python -u brain/main.py\" \"python -m pyapp.main --all\""
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@polymarket/builder-relayer-client": "^0.0.8",
-    "@polymarket/builder-signing-sdk": "^1.0.0",
-    "@polymarket/clob-client": "^5.8.1",
-    "axios": "^1.15.0",
-    "better-sqlite3": "^12.9.0",
-    "concurrently": "^9.2.1",
-    "crypto": "^1.0.1",
-    "dotenv": "^17.4.2",
-    "ethers": "^6.16.0",
-    "fs": "^0.0.1-security",
-    "grammy": "^1.42.0",
-    "node-telegram-bot-api": "^0.67.0",
-    "sqlite3": "^6.0.1",
-    "ts-node": "^10.9.2",
-    "typescript": "^6.0.3",
-    "viem": "^2.48.1"
-  },
-  "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13"
+    "concurrently": "^9.2.1"
   }
 }

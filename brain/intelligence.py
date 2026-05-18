@@ -21,17 +21,18 @@ class WeatherIntelligenceAgent:
     resolved outcomes, observed market pricing, and persistent bias tracking.
     """
 
-    VERSION = 1
+    VERSION = 2
     BLEND_RAMP = (
         (0, 0.0),
-        (50, 0.05),
-        (150, 0.15),
-        (250, 0.25),
+        (25, 0.08),
+        (75, 0.22),
+        (150, 0.35),
+        (250, 0.45),
     )
-    DECISION_DELTA_CAP = 0.10
-    DECISION_WEIGHT = 0.35
-    SEGMENT_ADJUSTMENT_CAP = 0.04
-    RECENT_BIAS_ADJUSTMENT_CAP = 0.05
+    DECISION_DELTA_CAP = 0.18
+    DECISION_WEIGHT = 0.55
+    SEGMENT_ADJUSTMENT_CAP = 0.07
+    RECENT_BIAS_ADJUSTMENT_CAP = 0.07
     def __init__(
         self,
         state_path="../data/intelligence_state.json",
@@ -83,6 +84,8 @@ class WeatherIntelligenceAgent:
             with open(self.state_path, "r", encoding="utf-8") as handle:
                 loaded = json.load(handle)
             if isinstance(loaded, dict):
+                if int(_safe_float(loaded.get("version"), 0)) != self.VERSION:
+                    return
                 merged = self._default_state()
                 merged.update(loaded)
                 merged["weights"] = {**self._default_state()["weights"], **loaded.get("weights", {})}
@@ -295,6 +298,10 @@ class WeatherIntelligenceAgent:
             segment_keys.append(f"local_hour:{meta['local_hour_bucket']}")
         if meta.get("continent"):
             segment_keys.append(f"continent:{meta['continent']}")
+        if meta.get("timezone"):
+            segment_keys.append(f"timezone:{meta['timezone']}")
+        if meta.get("city"):
+            segment_keys.append(f"city:{meta['city']}")
 
         weighted_residual = 0.0
         total_weight = 0.0
@@ -394,6 +401,10 @@ class WeatherIntelligenceAgent:
             segment_keys.append(f"local_hour:{meta.get('local_hour_bucket', 'unknown')}")
         if "continent" in meta:
             segment_keys.append(f"continent:{meta.get('continent', 'Unknown')}")
+        if "timezone" in meta:
+            segment_keys.append(f"timezone:{meta.get('timezone', 'UTC')}")
+        if "city" in meta:
+            segment_keys.append(f"city:{meta.get('city', 'Unknown')}")
 
         for key in segment_keys:
             stats = self.state.setdefault("segment_stats", {}).setdefault(key, {

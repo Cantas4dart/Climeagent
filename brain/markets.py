@@ -1,12 +1,18 @@
 import requests
 import re
 import time
+from pathlib import Path
 from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException, SSLError
 from urllib3.util.retry import Retry
 
+try:
+    from .console import safe_print
+except ImportError:
+    from console import safe_print
+
 class MarketClient:
-    def __init__(self):
+    def __init__(self, station_file_path=None):
         self.gamma_api_url = "https://gamma-api.polymarket.com"
         self.events_api_url = f"{self.gamma_api_url}/events"
         self.markets_api_url = f"{self.gamma_api_url}/markets"
@@ -14,6 +20,8 @@ class MarketClient:
         self.geocode_cache = {}  # Cache geocoding results to avoid repeated API calls
         self.tag_id_cache = {}
         self.session = self._build_session()
+        self.station_file_path = Path(station_file_path) if station_file_path else Path(__file__).resolve().parent.parent / "station.md"
+        self.station_overrides = self._load_station_overrides()
 
         # This bot is intentionally temperature-only, not a general weather-market bot.
         self.temperature_keywords = [
@@ -42,14 +50,6 @@ class MarketClient:
             "weather",
             "climate",
         ]
-        self.blocked_country_codes = {
-            "DZ", "AO", "BJ", "BW", "BF", "BI", "CM", "CV", "CF", "TD", "KM", "CD", "CG",
-            "CI", "DJ", "EG", "GQ", "ER", "SZ", "ET", "GA", "GM", "GH", "GN", "GW", "KE",
-            "LS", "LR", "LY", "MG", "MW", "ML", "MR", "MU", "YT", "MA", "MZ", "NA", "NE",
-            "NG", "RE", "RW", "SH", "ST", "SN", "SC", "SL", "SO", "ZA", "SS", "SD", "TZ",
-            "TG", "TN", "UG", "EH", "ZM", "ZW",
-        }
-
     def _build_session(self):
         session = requests.Session()
         retry = Retry(
@@ -76,7 +76,7 @@ class MarketClient:
         tagged_events = self._fetch_tagged_events()
         search_markets = self._fetch_search_markets()
         if not active_events and not search_markets:
-            print("[MARKETS] WARNING: No active events or search markets returned from Gamma API.")
+            safe_print("[MARKETS] WARNING: No active events or search markets returned from Gamma API.")
             return []
 
         unique_markets = {}
@@ -123,11 +123,11 @@ class MarketClient:
             unique_markets[market_id] = market
 
         temperature_markets = list(unique_markets.values())
-        print(f"[MARKETS] Reviewed {reviewed_markets} candidate markets across {len(combined_events)} events and {len(search_markets)} search hits.")
-        print(f"[MARKETS] Final active city temperature rung markets: {len(temperature_markets)}")
+        safe_print(f"[MARKETS] Reviewed {reviewed_markets} candidate markets across {len(combined_events)} events and {len(search_markets)} search hits.")
+        safe_print(f"[MARKETS] Final active city temperature rung markets: {len(temperature_markets)}")
 
         if len(temperature_markets) == 0:
-            print("[MARKETS] WARNING: No active city temperature ladders found on Polymarket right now.")
+            safe_print("[MARKETS] WARNING: No active city temperature ladders found on Polymarket right now.")
 
         return temperature_markets
 
@@ -148,10 +148,10 @@ class MarketClient:
                 }
                 batch = self._get_json(self.events_api_url, params=params, timeout=20, label=f"Events page {page + 1}")
                 if not isinstance(batch, list):
-                    print("[MARKETS] Unexpected events payload from Gamma API.")
+                    safe_print("[MARKETS] Unexpected events payload from Gamma API.")
                     break
 
-                print(f"[MARKETS] Events page {page + 1} -> {len(batch)} events")
+                safe_print(f"[MARKETS] Events page {page + 1} -> {len(batch)} events")
                 if len(batch) == 0:
                     break
 
@@ -161,7 +161,7 @@ class MarketClient:
 
                 offset += page_limit
             except Exception as e:
-                print(f"[MARKETS] Events page {page + 1} FAILED: {e}")
+                safe_print(f"[MARKETS] Events page {page + 1} FAILED: {e}")
                 break
 
         return events
@@ -185,37 +185,61 @@ class MarketClient:
                 }
                 batch = self._get_json(self.events_api_url, params=params, timeout=20, label=f"Tag events '{slug}'")
                 if not isinstance(batch, list):
-                    print(f"[MARKETS] Tag events '{slug}' returned an unexpected payload.")
+                    safe_print(f"[MARKETS] Tag events '{slug}' returned an unexpected payload.")
                     continue
 
-                print(f"[MARKETS] Tag events '{slug}' -> {len(batch)} events")
+                safe_print(f"[MARKETS] Tag events '{slug}' -> {len(batch)} events")
                 events.extend(batch)
             except Exception as e:
-                print(f"[MARKETS] Tag events '{slug}' FAILED: {e}")
+                safe_print(f"[MARKETS] Tag events '{slug}' FAILED: {e}")
 
         return events
 
-    def _fetch_search_markets(self, limit_per_term=100):
+    def _fetch_search_markets(self, limit_per_term=100, max_pages=5):
         """Fallback discovery path using the same search-style terms that surface markets on the site."""
         markets = []
 
         for term in self.search_terms:
-            try:
-                params = {
-                    "active": "true",
-                    "closed": "false",
-                    "limit": limit_per_term,
-                    "search": term,
-                }
-                batch = self._get_json(self.markets_api_url, params=params, timeout=20, label=f"Search '{term}'")
-                if not isinstance(batch, list):
-                    print(f"[MARKETS] Search '{term}' returned an unexpected payload.")
-                    continue
+            seen_ids = set()
+            for page in range(max_pages):
+                offset = page * limit_per_term
+                try:
+                    params = {
+                        "active": "true",
+                        "closed": "false",
+                        "limit": limit_per_term,
+                        "offset": offset,
+                        "search": term,
+                    }
+                    batch = self._get_json(
+                        self.markets_api_url,
+                        params=params,
+                        timeout=20,
+                        label=f"Search '{term}' page {page + 1}",
+                    )
+                    if not isinstance(batch, list):
+                        safe_print(f"[MARKETS] Search '{term}' page {page + 1} returned an unexpected payload.")
+                        break
 
-                print(f"[MARKETS] Search '{term}' -> {len(batch)} raw markets")
-                markets.extend(batch)
-            except Exception as e:
-                print(f"[MARKETS] Search '{term}' FAILED: {e}")
+                    safe_print(f"[MARKETS] Search '{term}' page {page + 1} -> {len(batch)} raw markets")
+                    if len(batch) == 0:
+                        break
+
+                    new_batch_count = 0
+                    for market in batch:
+                        market_id = market.get("id")
+                        if market_id is not None and market_id in seen_ids:
+                            continue
+                        if market_id is not None:
+                            seen_ids.add(market_id)
+                        markets.append(market)
+                        new_batch_count += 1
+
+                    if len(batch) < limit_per_term or new_batch_count == 0:
+                        break
+                except Exception as e:
+                    safe_print(f"[MARKETS] Search '{term}' page {page + 1} FAILED: {e}")
+                    break
 
         return markets
 
@@ -228,10 +252,10 @@ class MarketClient:
             tag_id = tag.get("id") if isinstance(tag, dict) else None
             if tag_id:
                 self.tag_id_cache[slug] = tag_id
-                print(f"[MARKETS] Tag '{slug}' -> id {tag_id}")
+                safe_print(f"[MARKETS] Tag '{slug}' -> id {tag_id}")
                 return tag_id
         except Exception as e:
-            print(f"[MARKETS] Tag '{slug}' lookup FAILED: {e}")
+            safe_print(f"[MARKETS] Tag '{slug}' lookup FAILED: {e}")
 
         self.tag_id_cache[slug] = None
         return None
@@ -246,14 +270,14 @@ class MarketClient:
             except SSLError as e:
                 last_error = e
                 if attempt < attempts:
-                    print(f"[MARKETS] {label} SSL error on attempt {attempt}/{attempts}; retrying...")
+                    safe_print(f"[MARKETS] {label} SSL error on attempt {attempt}/{attempts}; retrying...")
                     time.sleep(attempt)
                     continue
                 raise
             except RequestException as e:
                 last_error = e
                 if attempt < attempts:
-                    print(f"[MARKETS] {label} request error on attempt {attempt}/{attempts}; retrying...")
+                    safe_print(f"[MARKETS] {label} request error on attempt {attempt}/{attempts}; retrying...")
                     time.sleep(attempt)
                     continue
                 raise
@@ -314,7 +338,7 @@ class MarketClient:
         )
 
         if is_temperature:
-            print(f"[MARKETS]   [OK] KEPT: {self._market_display_name(market, event)[:120]}")
+            safe_print(f"[MARKETS]   [OK] KEPT: {self._market_display_name(market, event)[:120]}")
 
         return is_temperature
 
@@ -418,23 +442,16 @@ class MarketClient:
             "Munich": self._location_details("Munich", 48.1351, 11.5820, False, "DE", "Germany", "Europe", "Europe/Berlin"),
         }
 
-        blocked_locations = {
-            "Cairo",
-            "Lagos",
-            "Nairobi",
-            "Johannesburg",
-        }
-
         # Check hardcoded locations first
         for loc, coords in locations.items():
             if loc.lower() in market_description.lower():
-                if loc in blocked_locations:
-                    print(f"[MARKETS]   [SKIP] Blocked African city market: '{loc}'")
-                    return None
-                return coords
+                return self._apply_station_override(market_description, coords)
 
         # --- Step 2: Dynamic geocoding fallback ---
-        return self._geocode_from_question(market_description)
+        dynamic_location = self._geocode_from_question(market_description)
+        if not dynamic_location:
+            return None
+        return self._apply_station_override(market_description, dynamic_location)
 
     def _geocode_from_question(self, question):
         """
@@ -478,7 +495,7 @@ class MarketClient:
             if candidate in self.geocode_cache:
                 cached = self.geocode_cache[candidate]
                 if cached is not None:
-                    print(f"[MARKETS]   [GEOCODE] Cache hit: '{candidate}' -> ({cached['lat']}, {cached['lon']})")
+                    safe_print(f"[MARKETS]   [GEOCODE] Cache hit: '{candidate}' -> ({cached['lat']}, {cached['lon']})")
                     return cached
                 continue
 
@@ -492,7 +509,7 @@ class MarketClient:
 
         return None
 
-    def _geocode_city(self, city_name):
+    def _geocode_city(self, city_name, expected_country_code=None):
         """
         Geocode a city name using Open-Meteo's free geocoding API.
         Returns rich location metadata or None.
@@ -501,30 +518,41 @@ class MarketClient:
             url = "https://geocoding-api.open-meteo.com/v1/search"
             params = {
                 "name": city_name,
-                "count": 1,
+                "count": 3,
                 "language": "en",
                 "format": "json"
             }
-            res = requests.get(url, params=params, timeout=10)
+            if expected_country_code:
+                params["countryCode"] = str(expected_country_code).upper()
+
+            res = self.session.get(url, params=params, timeout=10)
             res.raise_for_status()
             data = res.json()
 
             results = data.get("results", [])
             if not results:
-                print(f"[MARKETS]   [GEOCODE] No results for '{city_name}'")
+                safe_print(f"[MARKETS]   [GEOCODE] No results for '{city_name}'")
                 return None
 
-            top = results[0]
+            top = None
+            expected_country_code = str(expected_country_code or "").upper()
+            if expected_country_code:
+                top = next(
+                    (
+                        item
+                        for item in results
+                        if str(item.get("country_code", "")).upper() == expected_country_code
+                    ),
+                    None,
+                )
+            if top is None:
+                top = results[0]
             lat = top["latitude"]
             lon = top["longitude"]
             country = top.get("country_code", "").upper()
             is_us = (country == "US")
-            if country in self.blocked_country_codes:
-                print(f"[MARKETS]   [SKIP] Blocked African city market: '{city_name}' in country_code={country}")
-                return None
-
-            print(f"[MARKETS]   [GEOCODE] Resolved '{city_name}' -> ({lat}, {lon}), "
-                  f"country={top.get('country', '?')}, is_us={is_us}")
+            safe_print(f"[MARKETS]   [GEOCODE] Resolved '{city_name}' -> ({lat}, {lon}), "
+                       f"country={top.get('country', '?')}, is_us={is_us}")
             return self._location_details(
                 top.get("name") or city_name,
                 lat,
@@ -537,7 +565,7 @@ class MarketClient:
             )
 
         except Exception as e:
-            print(f"[MARKETS]   [GEOCODE] Failed for '{city_name}': {e}")
+            safe_print(f"[MARKETS]   [GEOCODE] Failed for '{city_name}': {e}")
             return None
 
     def _location_details(self, city, lat, lon, is_us, country_code, country, continent, timezone_name):
@@ -551,6 +579,177 @@ class MarketClient:
             "continent": continent,
             "timezone": timezone_name or "UTC",
         }
+
+    def _load_station_overrides(self):
+        overrides = {}
+        try:
+            if not self.station_file_path.exists():
+                return overrides
+
+            lines = self.station_file_path.read_text(encoding="utf-8").splitlines()
+            reference_coordinates = self._load_station_reference_coordinates(lines)
+            pattern = re.compile(r"^\s*([^:]+):\s+(.+?):\s+(https?://\S+)\s*$")
+            for raw_line in lines:
+                match = pattern.match(raw_line.strip())
+                if not match:
+                    continue
+                city = match.group(1).strip()
+                station_url = match.group(3).strip()
+                station_id = self._extract_station_id(station_url)
+                coordinate_entry = self._resolve_station_reference_coordinates(
+                    city,
+                    station_id,
+                    reference_coordinates,
+                )
+                overrides[self._normalize_location_key(city)] = {
+                    "city": city,
+                    "station_name": match.group(2).strip(),
+                    "station_url": station_url,
+                    "station_id": station_id,
+                    "station_lat": coordinate_entry.get("lat") if coordinate_entry else None,
+                    "station_lon": coordinate_entry.get("lon") if coordinate_entry else None,
+                }
+        except OSError as exc:
+            safe_print(f"[MARKETS] Could not load station overrides: {exc}")
+        return overrides
+
+    def _load_station_reference_coordinates(self, lines):
+        references = []
+        pattern = re.compile(
+            r"^\|\s*(.+?)\s*\|\s*([A-Za-z0-9]{4})\s*\|\s*(-?\d+(?:\.\d+)?)\s*\|\s*(-?\d+(?:\.\d+)?)\s*\|"
+        )
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("|---"):
+                continue
+            match = pattern.match(line)
+            if not match:
+                continue
+            try:
+                references.append(
+                    {
+                        "label": match.group(1).strip(),
+                        "station_id": match.group(2).strip().upper(),
+                        "lat": float(match.group(3)),
+                        "lon": float(match.group(4)),
+                    }
+                )
+            except ValueError:
+                continue
+        return references
+
+    def _resolve_station_reference_coordinates(self, city, station_id, references):
+        normalized_aliases = self._station_aliases(city)
+        if station_id:
+            target_station_id = station_id.upper()
+            for entry in references:
+                if entry.get("station_id") == target_station_id:
+                    return entry
+        for entry in references:
+            normalized_label = self._normalize_location_key(entry.get("label"))
+            if any(alias and (alias in normalized_label or normalized_label in alias) for alias in normalized_aliases):
+                return entry
+        return None
+
+    def _normalize_location_key(self, value):
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    def _station_aliases(self, city_name):
+        normalized = self._normalize_location_key(city_name)
+        aliases = {normalized}
+        if normalized == "new york city":
+            aliases.update({"new york", "nyc"})
+        return aliases
+
+    def _find_station_override(self, market_description):
+        normalized_question = self._normalize_location_key(market_description)
+        for entry in self.station_overrides.values():
+            for alias in self._station_aliases(entry.get("city")):
+                if alias and alias in normalized_question:
+                    return entry
+        return None
+
+    def _apply_station_override(self, market_description, location):
+        station_entry = self._find_station_override(market_description)
+        if not station_entry:
+            return location
+
+        enriched = dict(location)
+        enriched.update(
+            {
+                "resolution_source": "station.md",
+                "resolution_station_name": station_entry.get("station_name"),
+                "resolution_station_url": station_entry.get("station_url"),
+                "resolution_station_id": station_entry.get("station_id"),
+                "resolution_station_city": station_entry.get("city"),
+                "resolution_coordinates_applied": False,
+            }
+        )
+
+        station_cache_key = f"station::{self._normalize_location_key(station_entry.get('city'))}"
+        station_location = self.geocode_cache.get(station_cache_key)
+        if station_location is None:
+            if station_entry.get("station_lat") is not None and station_entry.get("station_lon") is not None:
+                station_location = {
+                    "city": station_entry.get("city"),
+                    "lat": float(station_entry.get("station_lat")),
+                    "lon": float(station_entry.get("station_lon")),
+                    "is_us": bool(location.get("is_us")),
+                    "country_code": location.get("country_code"),
+                    "country": location.get("country"),
+                    "continent": location.get("continent"),
+                    "timezone": location.get("timezone"),
+                }
+            else:
+                station_query = ", ".join(
+                    part
+                    for part in [
+                        station_entry.get("station_name"),
+                        station_entry.get("city"),
+                        location.get("country"),
+                    ]
+                    if part
+                )
+                station_location = self._geocode_city(
+                    station_query,
+                    expected_country_code=location.get("country_code"),
+                )
+            self.geocode_cache[station_cache_key] = station_location
+
+        if station_location:
+            enriched["lat"] = station_location.get("lat", enriched.get("lat"))
+            enriched["lon"] = station_location.get("lon", enriched.get("lon"))
+            enriched["timezone"] = station_location.get("timezone") or enriched.get("timezone")
+            enriched["country_code"] = station_location.get("country_code") or enriched.get("country_code")
+            enriched["country"] = station_location.get("country") or enriched.get("country")
+            enriched["continent"] = station_location.get("continent") or enriched.get("continent")
+            enriched["is_us"] = bool(station_location.get("is_us", enriched.get("is_us")))
+            enriched["resolution_coordinates_applied"] = True
+            safe_print(
+                f"[MARKETS]   [STATION] Using resolution station for {enriched.get('city')}: "
+                f"{station_entry.get('station_name')} -> ({enriched.get('lat')}, {enriched.get('lon')})"
+            )
+        else:
+            safe_print(
+                f"[MARKETS]   [STATION] Keeping base coordinates for {enriched.get('city')} "
+                f"because station geocoding failed: {station_entry.get('station_name')}"
+            )
+
+        return enriched
+
+    def _extract_station_id(self, station_url):
+        if not station_url:
+            return None
+
+        weather_gov_match = re.search(r"[?&]site=([A-Za-z0-9]+)\b", station_url)
+        if weather_gov_match:
+            return weather_gov_match.group(1).upper()
+
+        wunderground_match = re.search(r"/([A-Za-z0-9]{4,8})/?$", station_url)
+        if wunderground_match:
+            return wunderground_match.group(1).upper()
+
+        return None
 
     def _country_to_continent(self, country_code):
         code = (country_code or "").upper()
@@ -604,12 +803,12 @@ class MarketClient:
 if __name__ == "__main__":
     client = MarketClient()
     markets = client.get_weather_markets()
-    print(f"\n=== Found {len(markets)} weather markets ===")
+    safe_print(f"\n=== Found {len(markets)} weather markets ===")
     for m in markets:
-        print(f"  - {m.get('question', '?')}")
+        safe_print(f"  - {m.get('question', '?')}")
 
     # Test geocoding fallback
-    print("\n=== Testing geocoding fallback ===")
+    safe_print("\n=== Testing geocoding fallback ===")
     test_questions = [
         "Will the highest temperature in Taipei exceed 35C?",
         "Will Helsinki temperature be above 20 degrees?",
@@ -618,4 +817,4 @@ if __name__ == "__main__":
     ]
     for q in test_questions:
         result = client.parse_market_location(q)
-        print(f"  '{q[:50]}...' -> {result}")
+        safe_print(f"  '{q[:50]}...' -> {result}")
