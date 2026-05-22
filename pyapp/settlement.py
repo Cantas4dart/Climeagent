@@ -18,6 +18,7 @@ from .platform_fee import (
 )
 from .polymarket import PolyMarketAPI
 from .singleton import acquire_process_lock
+from .temperature_history import StationHistoryClient
 
 load_dotenv()
 
@@ -37,6 +38,7 @@ def escape_html(value: str | None) -> str:
 class SettlementMonitor:
     def __init__(self):
         self.db = DBManager()
+        self.temperature_history = StationHistoryClient()
         self.telegram_bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
         self.state_file = Path(__file__).resolve().parent.parent / "data" / "settlement_state.json"
         self.learning_feedback_file = Path(__file__).resolve().parent.parent / "data" / "learning_feedback.jsonl"
@@ -94,6 +96,192 @@ class SettlementMonitor:
                     time.sleep(attempt)
 
         return None
+
+    def _resolved_yes_from_winner(self, winner: str) -> int:
+        return 1 if str(winner or "").upper() == "YES" else 0
+
+    def _load_temperature_analysis_entry(self, trade: Trade | PaperTrade) -> dict[str, Any] | None:
+        raw = getattr(trade, "temperature_analysis_entry", None)
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    def _target_bounds(self, target: dict[str, Any]) -> tuple[str | None, float | None, float | None]:
+        target_type = str(target.get("type") or "").strip().lower() or None
+        if target_type == "range":
+            return target_type, self._safe_float(target.get("low")), self._safe_float(target.get("high"))
+        if target_type in {"threshold", "exact"}:
+            value = self._safe_float(target.get("val"))
+            return target_type, value, value
+        return target_type, None, None
+
+    def _evaluate_target_hit(self, target: dict[str, Any], actual_temperature: float | None) -> int | None:
+        if actual_temperature is None:
+            return None
+
+        target_type = str(target.get("type") or "").strip().lower()
+        if target_type == "range":
+            low = self._safe_float(target.get("low"))
+            high = self._safe_float(target.get("high"))
+            if low is None or high is None:
+                return None
+            if float(low).is_integer() and float(high).is_integer():
+                return 1 if low <= actual_temperature < (high + 1.0) else 0
+            return 1 if low <= actual_temperature <= high else 0
+
+        if target_type == "exact":
+            value = self._safe_float(target.get("val"))
+            if value is None:
+                return None
+            rounded = self._round_half_away_from_zero(actual_temperature)
+            return 1 if rounded == value else 0
+
+        if target_type == "threshold":
+            value = self._safe_float(target.get("val"))
+            direction = str(target.get("direction") or "above").strip().lower()
+            if value is None:
+                return None
+            if direction == "below":
+                return 1 if actual_temperature <= value else 0
+            return 1 if actual_temperature >= value else 0
+
+        return None
+
+    def _safe_float(self, value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _round_half_away_from_zero(self, value: float) -> float:
+        return float(int(value + 0.5)) if value >= 0 else float(int(value - 0.5))
+
+    def record_temperature_analysis(self, trade_source: str, trade: Trade | PaperTrade, settled_yes: int, settled_at: str):
+        entry = self._load_temperature_analysis_entry(trade)
+        if not entry:
+            self.db.upsert_temperature_settlement_analysis(
+                {
+                    "trade_source": trade_source,
+                    "trade_id": trade.id,
+                    "market_id": trade.market_id,
+                    "condition_id": trade.condition_id,
+                    "market_date": trade.market_date,
+                    "city": None,
+                    "country_code": None,
+                    "timezone": None,
+                    "station_id": None,
+                    "station_name": None,
+                    "station_url": None,
+                    "target_type": None,
+                    "target_value_low": None,
+                    "target_value_high": None,
+                    "forecast_data_json": None,
+                    "entry_avg_forecast": None,
+                    "entry_model_prob": trade.entry_model_prob,
+                    "entry_market_prob": trade.entry_market_prob,
+                    "entry_confidence": trade.entry_confidence,
+                    "entry_spread": trade.entry_spread,
+                    "entry_regime": trade.entry_regime,
+                    "entry_timestamp": getattr(trade, "timestamp", None),
+                    "settled_yes": settled_yes,
+                    "settled_at": settled_at,
+                    "actual_temperature": None,
+                    "actual_temperature_unit": None,
+                    "actual_observed_at": None,
+                    "actual_source": None,
+                    "actual_source_status": "missing_entry_snapshot",
+                    "forecast_error_avg": None,
+                    "forecast_error_by_source_json": None,
+                    "rounded_settlement_value": None,
+                    "target_hit": None,
+                    "created_at": None,
+                }
+            )
+            return
+
+        target = entry.get("target") if isinstance(entry.get("target"), dict) else {}
+        target_type, target_value_low, target_value_high = self._target_bounds(target)
+        supported_target = target_type in {"threshold", "exact", "range"}
+        forecast_data = entry.get("forecast_data") if isinstance(entry.get("forecast_data"), dict) else {}
+        numeric_forecasts = {
+            str(name): float(value)
+            for name, value in forecast_data.items()
+            if self._safe_float(value) is not None
+        }
+        entry_avg_forecast = (
+            round(sum(numeric_forecasts.values()) / len(numeric_forecasts), 4)
+            if numeric_forecasts
+            else None
+        )
+
+        resolution = self.temperature_history.fetch_daily_actual_temperature(entry)
+        actual_temperature = self._safe_float(resolution.get("actual_temperature"))
+        actual_temperature_unit = resolution.get("actual_temperature_unit")
+        actual_observed_at = resolution.get("actual_observed_at")
+        actual_source = resolution.get("actual_source")
+        actual_source_status = resolution.get("actual_source_status") or "missing_station_data"
+
+        forecast_error_avg = None
+        forecast_error_by_source_json = None
+        rounded_settlement_value = None
+        target_hit = None
+
+        if actual_temperature is not None:
+            rounded_settlement_value = self._round_half_away_from_zero(actual_temperature)
+            target_hit = self._evaluate_target_hit(target, actual_temperature) if supported_target else None
+            if numeric_forecasts:
+                error_by_source = {
+                    name: round(value - actual_temperature, 4)
+                    for name, value in numeric_forecasts.items()
+                }
+                forecast_error_by_source_json = json.dumps(error_by_source, sort_keys=True)
+                forecast_error_avg = round(
+                    (sum(numeric_forecasts.values()) / len(numeric_forecasts)) - actual_temperature,
+                    4,
+                )
+
+        self.db.upsert_temperature_settlement_analysis(
+            {
+                "trade_source": trade_source,
+                "trade_id": trade.id,
+                "market_id": trade.market_id,
+                "condition_id": trade.condition_id,
+                "market_date": trade.market_date or entry.get("market_date"),
+                "city": entry.get("city"),
+                "country_code": entry.get("country_code"),
+                "timezone": entry.get("timezone"),
+                "station_id": entry.get("station_id"),
+                "station_name": entry.get("station_name"),
+                "station_url": entry.get("station_url"),
+                "target_type": target_type,
+                "target_value_low": target_value_low,
+                "target_value_high": target_value_high,
+                "forecast_data_json": json.dumps(numeric_forecasts, sort_keys=True) if numeric_forecasts else None,
+                "entry_avg_forecast": entry_avg_forecast,
+                "entry_model_prob": trade.entry_model_prob,
+                "entry_market_prob": trade.entry_market_prob,
+                "entry_confidence": trade.entry_confidence,
+                "entry_spread": trade.entry_spread,
+                "entry_regime": trade.entry_regime,
+                "entry_timestamp": entry.get("entry_timestamp") or getattr(trade, "timestamp", None),
+                "settled_yes": settled_yes,
+                "settled_at": settled_at,
+                "actual_temperature": actual_temperature,
+                "actual_temperature_unit": actual_temperature_unit,
+                "actual_observed_at": actual_observed_at,
+                "actual_source": actual_source,
+                "actual_source_status": actual_source_status if supported_target else "unsupported_market_shape",
+                "forecast_error_avg": forecast_error_avg,
+                "forecast_error_by_source_json": forecast_error_by_source_json,
+                "rounded_settlement_value": rounded_settlement_value,
+                "target_hit": target_hit,
+                "created_at": None,
+            }
+        )
 
     def run_loop(self):
         print("-----------------------------------------")
@@ -153,6 +341,11 @@ class SettlementMonitor:
                 win = trade.side == winner
                 pnl = (trade.size * (1 - trade.buy_price)) if win else -(trade.size * trade.buy_price)
                 self.db.mark_settled(trade.id, 1 if win else 0, pnl)
+                settled_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                try:
+                    self.record_temperature_analysis("live", trade, self._resolved_yes_from_winner(winner), settled_at)
+                except Exception as exc:
+                    print(f"[PYSETTLE] Temperature analysis failed for live trade {trade.id}: {exc}")
 
                 claim_message = "Manual claim available with /claim or /claim_all."
                 if win:
@@ -213,6 +406,11 @@ class SettlementMonitor:
                 win = trade.side == winner
                 pnl = (trade.size * (1 - trade.entry_price)) if win else -(trade.size * trade.entry_price)
                 self.db.mark_paper_trade_settled(trade.id, 1 if win else 0, pnl)
+                settled_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                try:
+                    self.record_temperature_analysis("paper", trade, self._resolved_yes_from_winner(winner), settled_at)
+                except Exception as exc:
+                    print(f"[PYSETTLE] Temperature analysis failed for paper trade {trade.id}: {exc}")
                 self.send_paper_settlement_alert(
                     PaperTrade(
                         **{

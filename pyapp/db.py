@@ -41,6 +41,7 @@ class Trade:
     entry_spread: float | None
     entry_regime: str | None
     learning_features: str | None
+    temperature_analysis_entry: str | None
     execution_status: str | None
     order_id: str | None
     position_closed: int
@@ -77,6 +78,7 @@ class PaperTrade:
     entry_spread: float | None
     entry_regime: str | None
     learning_features: str | None
+    temperature_analysis_entry: str | None
     settled: int
     outcome: int | None
     pnl: float | None
@@ -163,6 +165,7 @@ class DBManager:
               entry_spread REAL,
               entry_regime TEXT,
               learning_features TEXT,
+              temperature_analysis_entry TEXT,
               execution_status TEXT DEFAULT 'submitted',
               order_id TEXT,
               position_closed INTEGER DEFAULT 0,
@@ -201,6 +204,7 @@ class DBManager:
               entry_spread REAL,
               entry_regime TEXT,
               learning_features TEXT,
+              temperature_analysis_entry TEXT,
               settled INTEGER DEFAULT 0,
               outcome INTEGER,
               pnl REAL,
@@ -208,6 +212,48 @@ class DBManager:
               alert_sent_at DATETIME,
               feedback_exported_at DATETIME,
               timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS temperature_settlement_analysis (
+              trade_source TEXT NOT NULL,
+              trade_id INTEGER NOT NULL,
+              market_id TEXT,
+              condition_id TEXT,
+              market_date TEXT,
+              city TEXT,
+              country_code TEXT,
+              timezone TEXT,
+              station_id TEXT,
+              station_name TEXT,
+              station_url TEXT,
+              target_type TEXT,
+              target_value_low REAL,
+              target_value_high REAL,
+              forecast_data_json TEXT,
+              entry_avg_forecast REAL,
+              entry_model_prob REAL,
+              entry_market_prob REAL,
+              entry_confidence REAL,
+              entry_spread REAL,
+              entry_regime TEXT,
+              entry_timestamp TEXT,
+              settled_yes INTEGER,
+              settled_at TEXT,
+              actual_temperature REAL,
+              actual_temperature_unit TEXT,
+              actual_observed_at TEXT,
+              actual_source TEXT,
+              actual_source_status TEXT,
+              forecast_error_avg REAL,
+              forecast_error_by_source_json TEXT,
+              rounded_settlement_value REAL,
+              target_hit INTEGER,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY (trade_source, trade_id)
             )
             """
         )
@@ -221,6 +267,7 @@ class DBManager:
             ("entry_spread", "REAL"),
             ("entry_regime", "TEXT"),
             ("learning_features", "TEXT"),
+            ("temperature_analysis_entry", "TEXT"),
             ("execution_status", "TEXT DEFAULT 'submitted'"),
             ("order_id", "TEXT"),
             ("position_closed", "INTEGER DEFAULT 0"),
@@ -237,7 +284,7 @@ class DBManager:
             ("feedback_exported_at", "DATETIME"),
         ]:
             self.ensure_column("trades", column, definition)
-        for column, definition in [("alert_sent_at", "DATETIME"), ("market_date", "TEXT")]:
+        for column, definition in [("alert_sent_at", "DATETIME"), ("market_date", "TEXT"), ("temperature_analysis_entry", "TEXT")]:
             self.ensure_column("paper_trades", column, definition)
         for column, definition in [
             ("funder_address", "TEXT"),
@@ -483,9 +530,9 @@ class DBManager:
             INSERT OR IGNORE INTO trades (
               market_id, market_date, condition_id, tg_id, side, buy_price, size, remaining_size,
               entry_model_prob, entry_market_prob, entry_confidence, entry_spread, entry_regime,
-              learning_features, execution_status
+              learning_features, temperature_analysis_entry, execution_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'placing')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'placing')
             """,
             (
                 trade["market_id"],
@@ -502,6 +549,7 @@ class DBManager:
                 trade.get("entry_spread"),
                 trade.get("entry_regime"),
                 trade.get("learning_features"),
+                trade.get("temperature_analysis_entry"),
             ),
         )
         self.conn.commit()
@@ -537,9 +585,10 @@ class DBManager:
             """
             INSERT OR IGNORE INTO paper_trades (
               market_id, market_date, condition_id, tg_id, side, entry_price, size, entry_model_prob,
-              entry_market_prob, entry_confidence, entry_spread, entry_regime, learning_features
+              entry_market_prob, entry_confidence, entry_spread, entry_regime, learning_features,
+              temperature_analysis_entry
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trade["market_id"],
@@ -555,6 +604,7 @@ class DBManager:
                 trade.get("entry_spread"),
                 trade.get("entry_regime"),
                 trade.get("learning_features"),
+                trade.get("temperature_analysis_entry"),
             ),
         )
         self.conn.commit()
@@ -796,6 +846,65 @@ class DBManager:
             WHERE id = ?
             """,
             (trade_id,),
+        )
+        self.conn.commit()
+
+    def upsert_temperature_settlement_analysis(self, record: dict[str, Any]):
+        self.conn.execute(
+            """
+            INSERT INTO temperature_settlement_analysis (
+              trade_source, trade_id, market_id, condition_id, market_date, city, country_code, timezone,
+              station_id, station_name, station_url, target_type, target_value_low, target_value_high,
+              forecast_data_json, entry_avg_forecast, entry_model_prob, entry_market_prob, entry_confidence,
+              entry_spread, entry_regime, entry_timestamp, settled_yes, settled_at, actual_temperature,
+              actual_temperature_unit, actual_observed_at, actual_source, actual_source_status,
+              forecast_error_avg, forecast_error_by_source_json, rounded_settlement_value, target_hit,
+              created_at, updated_at
+            )
+            VALUES (
+              :trade_source, :trade_id, :market_id, :condition_id, :market_date, :city, :country_code, :timezone,
+              :station_id, :station_name, :station_url, :target_type, :target_value_low, :target_value_high,
+              :forecast_data_json, :entry_avg_forecast, :entry_model_prob, :entry_market_prob, :entry_confidence,
+              :entry_spread, :entry_regime, :entry_timestamp, :settled_yes, :settled_at, :actual_temperature,
+              :actual_temperature_unit, :actual_observed_at, :actual_source, :actual_source_status,
+              :forecast_error_avg, :forecast_error_by_source_json, :rounded_settlement_value, :target_hit,
+              COALESCE(:created_at, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP
+            )
+            ON CONFLICT(trade_source, trade_id) DO UPDATE SET
+              market_id = excluded.market_id,
+              condition_id = excluded.condition_id,
+              market_date = excluded.market_date,
+              city = excluded.city,
+              country_code = excluded.country_code,
+              timezone = excluded.timezone,
+              station_id = excluded.station_id,
+              station_name = excluded.station_name,
+              station_url = excluded.station_url,
+              target_type = excluded.target_type,
+              target_value_low = excluded.target_value_low,
+              target_value_high = excluded.target_value_high,
+              forecast_data_json = excluded.forecast_data_json,
+              entry_avg_forecast = excluded.entry_avg_forecast,
+              entry_model_prob = excluded.entry_model_prob,
+              entry_market_prob = excluded.entry_market_prob,
+              entry_confidence = excluded.entry_confidence,
+              entry_spread = excluded.entry_spread,
+              entry_regime = excluded.entry_regime,
+              entry_timestamp = excluded.entry_timestamp,
+              settled_yes = excluded.settled_yes,
+              settled_at = excluded.settled_at,
+              actual_temperature = excluded.actual_temperature,
+              actual_temperature_unit = excluded.actual_temperature_unit,
+              actual_observed_at = excluded.actual_observed_at,
+              actual_source = excluded.actual_source,
+              actual_source_status = excluded.actual_source_status,
+              forecast_error_avg = excluded.forecast_error_avg,
+              forecast_error_by_source_json = excluded.forecast_error_by_source_json,
+              rounded_settlement_value = excluded.rounded_settlement_value,
+              target_hit = excluded.target_hit,
+              updated_at = CURRENT_TIMESTAMP
+            """,
+            record,
         )
         self.conn.commit()
 

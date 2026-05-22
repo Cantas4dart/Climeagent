@@ -172,6 +172,7 @@ class TradeExecutor:
                         "learning_features": json.dumps(signal.get("learning_features"))
                         if signal.get("learning_features") is not None
                         else None,
+                        "temperature_analysis_entry": self._temperature_analysis_entry_json(signal),
                     }
                 )
                 if changes == 0:
@@ -242,6 +243,7 @@ class TradeExecutor:
                         "learning_features": json.dumps(signal.get("learning_features"))
                         if signal.get("learning_features") is not None
                         else None,
+                        "temperature_analysis_entry": self._temperature_analysis_entry_json(signal),
                     }
                 )
 
@@ -342,6 +344,31 @@ class TradeExecutor:
             user.private_key or "",
             account_config,
         )
+
+    def _temperature_analysis_entry_json(self, signal: dict[str, Any]) -> str | None:
+        forecast_data = signal.get("forecast_data")
+        if not isinstance(forecast_data, dict) or not forecast_data:
+            return None
+
+        target = signal.get("target") if isinstance(signal.get("target"), dict) else {}
+        payload = {
+            "market_id": signal.get("market_id"),
+            "condition_id": signal.get("condition_id"),
+            "market_date": signal.get("market_date"),
+            "city": signal.get("city"),
+            "country_code": signal.get("country_code"),
+            "timezone": signal.get("timezone"),
+            "station_id": signal.get("resolution_station_id"),
+            "station_name": signal.get("resolution_station_name"),
+            "station_url": signal.get("resolution_station_url"),
+            "location_lat": signal.get("location_lat"),
+            "location_lon": signal.get("location_lon"),
+            "temperature_unit": signal.get("temperature_unit"),
+            "target": target,
+            "forecast_data": forecast_data,
+            "entry_timestamp": signal.get("timestamp"),
+        }
+        return json.dumps(payload)
 
     def assess_conflict(self, trade: Any, state: dict[str, Any]) -> dict[str, Any]:
         entry_model_prob = float(trade.entry_model_prob or trade.buy_price or 0.0)

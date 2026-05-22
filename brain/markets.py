@@ -18,6 +18,8 @@ class MarketClient:
         self.markets_api_url = f"{self.gamma_api_url}/markets"
         self.tags_api_url = f"{self.gamma_api_url}/tags"
         self.geocode_cache = {}  # Cache geocoding results to avoid repeated API calls
+        self.location_parse_cache = {}
+        self._logged_station_overrides = set()
         self.tag_id_cache = {}
         self.session = self._build_session()
         self.station_file_path = Path(station_file_path) if station_file_path else Path(__file__).resolve().parent.parent / "station.md"
@@ -371,6 +373,10 @@ class MarketClient:
            Open-Meteo's free geocoding API (no API key needed).
         3. Cache geocoding results to avoid repeated API calls.
         """
+        cache_key = market_description.strip().lower()
+        if cache_key in self.location_parse_cache:
+            cached_location = self.location_parse_cache[cache_key]
+            return dict(cached_location) if cached_location else None
 
         # --- Step 1: Hardcoded high-priority locations ---
         locations = {
@@ -445,13 +451,18 @@ class MarketClient:
         # Check hardcoded locations first
         for loc, coords in locations.items():
             if loc.lower() in market_description.lower():
-                return self._apply_station_override(market_description, coords)
+                resolved = self._apply_station_override(market_description, coords)
+                self.location_parse_cache[cache_key] = dict(resolved) if resolved else None
+                return dict(resolved) if resolved else None
 
         # --- Step 2: Dynamic geocoding fallback ---
         dynamic_location = self._geocode_from_question(market_description)
         if not dynamic_location:
+            self.location_parse_cache[cache_key] = None
             return None
-        return self._apply_station_override(market_description, dynamic_location)
+        resolved = self._apply_station_override(market_description, dynamic_location)
+        self.location_parse_cache[cache_key] = dict(resolved) if resolved else None
+        return dict(resolved) if resolved else None
 
     def _geocode_from_question(self, question):
         """
@@ -725,10 +736,18 @@ class MarketClient:
             enriched["continent"] = station_location.get("continent") or enriched.get("continent")
             enriched["is_us"] = bool(station_location.get("is_us", enriched.get("is_us")))
             enriched["resolution_coordinates_applied"] = True
-            safe_print(
-                f"[MARKETS]   [STATION] Using resolution station for {enriched.get('city')}: "
-                f"{station_entry.get('station_name')} -> ({enriched.get('lat')}, {enriched.get('lon')})"
+            log_key = (
+                self._normalize_location_key(enriched.get("city")),
+                station_entry.get("station_id"),
+                round(float(enriched.get("lat", 0.0)), 5),
+                round(float(enriched.get("lon", 0.0)), 5),
             )
+            if log_key not in self._logged_station_overrides:
+                self._logged_station_overrides.add(log_key)
+                safe_print(
+                    f"[MARKETS]   [STATION] Using resolution station for {enriched.get('city')}: "
+                    f"{station_entry.get('station_name')} -> ({enriched.get('lat')}, {enriched.get('lon')})"
+                )
         else:
             safe_print(
                 f"[MARKETS]   [STATION] Keeping base coordinates for {enriched.get('city')} "

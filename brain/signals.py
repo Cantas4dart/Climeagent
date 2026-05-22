@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import sys
@@ -30,6 +31,7 @@ class SignalGenerator:
         self.forecast_history_path = os.path.join(os.path.dirname(__file__), "../data/forecast_history.json")
         self.forecast_history = self._load_forecast_history()
         self.run_count = 0
+        self._run_forecast_cache = {}
         self.month_map = {
             "january": 1,
             "february": 2,
@@ -55,6 +57,7 @@ class SignalGenerator:
         self.run_count += 1
         start_time = datetime.now()
         self.forecast_history = self._load_forecast_history()
+        self._run_forecast_cache = {}
         self.log(f"\n[SIGNAL] {'='*55}")
         self.log(f"[SIGNAL]   SCAN #{self.run_count} -- {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         self.log(f"[SIGNAL] {'='*55}")
@@ -96,6 +99,7 @@ class SignalGenerator:
             "sanity_blocked": 0,
             "no_edge": 0,
             "forecast_timing": 0,
+            "market_date_mismatch": 0,
             "error": 0
         }
 
@@ -115,6 +119,15 @@ class SignalGenerator:
         for event_index, (event_label, markets) in enumerate(grouped_markets.items(), start=1):
             self.log(f"\n[SIGNAL] ===== Event {event_index}/{total_events}: {event_label} =====")
             ordered_markets = self.sort_markets_by_rung(markets)
+            ordered_markets, date_filtered_count = self._filter_markets_for_current_local_date(ordered_markets)
+            if date_filtered_count:
+                skipped["market_date_mismatch"] += date_filtered_count
+                self.log(
+                    f"[SIGNAL] Filtered {date_filtered_count} stale/future market(s) "
+                    "outside each city's local scan date."
+                )
+            if not ordered_markets:
+                continue
             event_best_signal = None
             event_best_score = None
 
@@ -152,9 +165,24 @@ class SignalGenerator:
                     self.log(f"[SIGNAL] +------------------------------------------")
                     continue
                 self.log(f"[SIGNAL] | Market Date: {market_date.isoformat()}")
+                if not self._is_current_local_market_date(location, market_date):
+                    local_date = self._current_local_date(location)
+                    self.log(
+                        f"[SIGNAL] | >> SKIP: Market date {market_date.isoformat()} "
+                        f"does not match local scan date {local_date.isoformat()}."
+                    )
+                    skipped["market_date_mismatch"] += 1
+                    self.log(f"[SIGNAL] +-------------------------------------------")
+                    continue
 
                 # Step 3: Get forecast
-                forecast = self.weather.get_forecast(lat, lon, is_us)
+                forecast = self._get_cached_forecast(
+                    lat,
+                    lon,
+                    is_us,
+                    location,
+                    market_date,
+                )
                 if not forecast:
                     self.log(f"[SIGNAL] | >> SKIP: Weather forecast fetch failed.")
                     skipped["no_forecast"] += 1
@@ -179,6 +207,12 @@ class SignalGenerator:
                         self.log(f"[SIGNAL] +------------------------------------------")
                         continue
                     self.log(f"[SIGNAL] | Forecasts: {forecast_data}")
+                    enhancement = forecast.get("enhancement", {}) if isinstance(forecast, dict) else {}
+                    if enhancement.get("adjusted_high_temperature") is not None:
+                        self.log(
+                            f"[SIGNAL] | Enhanced High: {enhancement['adjusted_high_temperature']:.2f}"
+                            f" | Forecast Conf: {enhancement.get('confidence_score', 0.0):.2f}"
+                        )
 
                     market_context = self.build_market_context(location, forecast, market_date)
                     market_context = self._enrich_market_context(
@@ -189,11 +223,23 @@ class SignalGenerator:
                         market_date,
                         is_us,
                     )
+                    freshness = self._forecast_freshness_snapshot(forecast, market_context, market_date)
+                    market_context.update(freshness)
                     self.log(
                         f"[SIGNAL] | Local Time: {market_context['local_now']} "
                         f"| Hour: {market_context['local_hour']} "
                         f"| Stage: {market_context['local_peak_stage_detail']}"
                     )
+                    self.log(
+                        f"[SIGNAL] | Forecast Freshness: bundle_age={market_context['forecast_bundle_age_minutes']:.1f}m "
+                        f"| {self._format_metar_freshness(market_context)}"
+                    )
+                    if market_context.get("provider_primary_source"):
+                        self.log(
+                            f"[SIGNAL] | Provider Freshness: {market_context['provider_primary_source']} "
+                            f"age={market_context['provider_issue_age_minutes']:.1f}m "
+                            f"({market_context['provider_issue_source']})"
+                        )
                     self.log(
                         f"[SIGNAL] | Drift: {market_context['forecast_revision_direction']} "
                         f"({market_context['forecast_revision_delta']:+.2f}) | "
@@ -205,6 +251,12 @@ class SignalGenerator:
                             f"[SIGNAL] | Resolution Station: {market_context['resolution_station_name']} "
                             f"({station_mode})"
                         )
+                    freshness_gate = self._freshness_gate(market_context, market_date)
+                    if freshness_gate["blocked"]:
+                        self.log(f"[SIGNAL] | >> SKIP: {freshness_gate['reason']}")
+                        skipped["no_forecast"] += 1
+                        self.log(f"[SIGNAL] +------------------------------------------")
+                        continue
 
                     # Step 6: Calculate ensemble probability
                     avg_prob, spread, ensemble_stats = self.model.calculate_ensemble_probability(forecast_data, target)
@@ -302,6 +354,8 @@ class SignalGenerator:
                             "rounding_risk": market_context["rounding_risk"],
                             "station_mismatch_risk": market_context["station_mismatch_risk"],
                             "observation_progress": market_context["observation_progress"],
+                            "exact_rounding_consensus": market_context.get("exact_rounding_consensus", 0.0),
+                            "exact_rounding_protected": bool(market_context.get("exact_rounding_protected", False)),
                         }
                     )
                     self.log(
@@ -328,9 +382,18 @@ class SignalGenerator:
                             "local_peak_stage": market_context["local_peak_stage"],
                             "local_peak_stage_detail": market_context["local_peak_stage_detail"],
                             "forecast_revision_direction": market_context["forecast_revision_direction"],
+                            "forecast_fetched_at": market_context.get("forecast_fetched_at"),
+                            "forecast_bundle_age_minutes": round(market_context.get("forecast_bundle_age_minutes", 0.0), 3),
+                            "provider_primary_source": market_context.get("provider_primary_source"),
+                            "provider_issued_at": market_context.get("provider_issued_at"),
+                            "provider_issue_age_minutes": round(market_context.get("provider_issue_age_minutes", 0.0), 3),
+                            "provider_issue_source": market_context.get("provider_issue_source"),
+                            "metar_observed_at": market_context.get("metar_observed_at"),
+                            "metar_age_hours": round(market_context.get("metar_age_hours", 0.0), 3),
                             "resolution_source": market_context.get("resolution_source"),
                             "resolution_station_name": market_context.get("resolution_station_name"),
                             "resolution_station_url": market_context.get("resolution_station_url"),
+                            "resolution_station_id": market_context.get("resolution_station_id"),
                             "resolution_coordinates_applied": bool(market_context.get("resolution_coordinates_applied")),
                             "entry_timing_blocked": bool(entry_timing_gate["blocked"]),
                             "entry_timing_reason": entry_timing_gate["reason"],
@@ -369,6 +432,14 @@ class SignalGenerator:
                         "forecast_revision_delta": round(market_context["forecast_revision_delta"], 4),
                         "forecast_revision_volatility": round(market_context["forecast_revision_volatility"], 4),
                         "forecast_revision_direction": market_context["forecast_revision_direction"],
+                        "forecast_fetched_at": market_context.get("forecast_fetched_at"),
+                        "forecast_bundle_age_minutes": round(market_context.get("forecast_bundle_age_minutes", 0.0), 4),
+                        "provider_primary_source": market_context.get("provider_primary_source"),
+                        "provider_issued_at": market_context.get("provider_issued_at"),
+                        "provider_issue_age_minutes": round(market_context.get("provider_issue_age_minutes", 0.0), 4),
+                        "provider_issue_source": market_context.get("provider_issue_source"),
+                        "metar_observed_at": market_context.get("metar_observed_at"),
+                        "metar_age_hours": round(market_context.get("metar_age_hours", 0.0), 4),
                         "settlement_risk": round(market_context["settlement_risk"], 4),
                         "rounding_risk": round(market_context["rounding_risk"], 4),
                         "station_mismatch_risk": round(market_context["station_mismatch_risk"], 4),
@@ -376,6 +447,7 @@ class SignalGenerator:
                         "resolution_source": market_context.get("resolution_source"),
                         "resolution_station_name": market_context.get("resolution_station_name"),
                         "resolution_station_url": market_context.get("resolution_station_url"),
+                        "resolution_station_id": market_context.get("resolution_station_id"),
                         "resolution_coordinates_applied": bool(market_context.get("resolution_coordinates_applied")),
                         "entry_timing_blocked": bool(entry_timing_gate["blocked"]),
                         "entry_timing_reason": entry_timing_gate["reason"],
@@ -446,11 +518,15 @@ class SignalGenerator:
                             "resolution_source": market_context.get("resolution_source"),
                             "resolution_station_name": market_context.get("resolution_station_name"),
                             "resolution_station_url": market_context.get("resolution_station_url"),
+                            "resolution_station_id": market_context.get("resolution_station_id"),
                             "resolution_coordinates_applied": bool(market_context.get("resolution_coordinates_applied")),
                             "entry_timing_blocked": bool(entry_timing_gate["blocked"]),
                             "entry_timing_reason": entry_timing_gate["reason"],
                             "target": target,
                             "forecast_data": {k: round(v, 2) for k, v in forecast_data.items()},
+                            "temperature_unit": "fahrenheit" if market_context.get("country_code") == "US" else "celsius",
+                            "location_lat": round(float(market_context.get("lat")), 5) if market_context.get("lat") is not None else None,
+                            "location_lon": round(float(market_context.get("lon")), 5) if market_context.get("lon") is not None else None,
                             "avg_model_prob": round(avg_prob, 4),
                             "intelligence_prob": round(learned_prob, 4),
                             "adjusted_model_prob": round(decision["adjusted_model_prob"], 4),
@@ -895,6 +971,15 @@ class SignalGenerator:
         return None
 
     def extract_predicted_temps(self, forecast, is_us, market_date):
+        if isinstance(forecast, dict):
+            enhanced_sources = forecast.get("enhanced_sources", {})
+            if isinstance(enhanced_sources, dict) and enhanced_sources:
+                return {
+                    str(name): float(value)
+                    for name, value in enhanced_sources.items()
+                    if value is not None
+                }
+
         if is_us:
             return self._extract_noaa_temperatures(forecast, market_date)
         else:
@@ -988,6 +1073,8 @@ class SignalGenerator:
 
         return {
             "city": location.get("city"),
+            "lat": location.get("lat"),
+            "lon": location.get("lon"),
             "country": location.get("country"),
             "country_code": location.get("country_code"),
             "continent": location.get("continent", "Unknown"),
@@ -1002,9 +1089,21 @@ class SignalGenerator:
             "resolution_source": location.get("resolution_source"),
             "resolution_station_name": location.get("resolution_station_name"),
             "resolution_station_url": location.get("resolution_station_url"),
+            "resolution_station_id": location.get("resolution_station_id") or location.get("station_id"),
             "resolution_station_city": location.get("resolution_station_city"),
             "resolution_coordinates_applied": bool(location.get("resolution_coordinates_applied", False)),
         }
+
+    def _current_local_date(self, location):
+        timezone_name = location.get("timezone") or "UTC"
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = timezone.utc
+        return datetime.now(tz).date()
+
+    def _is_current_local_market_date(self, location, market_date):
+        return market_date == self._current_local_date(location)
 
     def _enrich_market_context(self, market_context, forecast, forecast_data, target, market_date, is_us):
         history_key = self._forecast_history_key(market_context, market_date)
@@ -1055,6 +1154,24 @@ class SignalGenerator:
         else:
             temp_dispersion = 0.0
 
+        exact_rounding_consensus = 0.0
+        exact_rounding_protected = False
+        if target.get("type") == "exact" and forecast_data:
+            target_val = float(target.get("val", avg_forecast))
+            if math.isclose(target_val, round(target_val), abs_tol=1e-9):
+                forecasts = [float(v) for v in forecast_data.values()]
+                rounded_hits = [
+                    1.0
+                    if float(self.model._round_half_away_from_zero(temp)) == target_val
+                    else 0.0
+                    for temp in forecasts
+                ]
+                exact_rounding_consensus = sum(rounded_hits) / len(rounded_hits)
+                exact_rounding_protected = (
+                    exact_rounding_consensus >= 0.999
+                    and max(abs(temp - target_val) for temp in forecasts) <= 0.5
+                )
+
         history.append({
             "captured_at": datetime.now(timezone.utc).isoformat(),
             "avg_forecast": round(avg_forecast, 4),
@@ -1072,8 +1189,165 @@ class SignalGenerator:
             "settlement_risk": settlement_risk,
             "observation_progress": observation_progress,
             "temp_dispersion": temp_dispersion,
+            "exact_rounding_consensus": exact_rounding_consensus,
+            "exact_rounding_protected": exact_rounding_protected,
             "calibration_buckets": self.intelligence.state.get("calibration_buckets", {}),
         }
+
+    def _forecast_freshness_snapshot(self, forecast, market_context, market_date):
+        local_tz_name = market_context.get("timezone") or "UTC"
+        try:
+            local_tz = ZoneInfo(local_tz_name)
+        except Exception:
+            local_tz = timezone.utc
+
+        local_now = self._parse_timestamp(market_context.get("local_now"), default_tz=local_tz)
+        if local_now is None:
+            local_now = datetime.now(local_tz)
+
+        fetched_at = self._parse_timestamp((forecast or {}).get("fetched_at"))
+        bundle_age_minutes = 9999.0
+        if fetched_at is not None:
+            bundle_age_minutes = max(0.0, (local_now - fetched_at.astimezone(local_tz)).total_seconds() / 60.0)
+
+        metar = (forecast or {}).get("metar") or {}
+        metar_observed_at = None
+        for key in ("obsTime", "observation_time", "timestamp", "date"):
+            metar_observed_at = self._parse_timestamp(metar.get(key))
+            if metar_observed_at is not None:
+                break
+
+        metar_age_hours = 9999.0
+        if metar_observed_at is not None:
+            metar_age_hours = max(0.0, (local_now - metar_observed_at.astimezone(local_tz)).total_seconds() / 3600.0)
+
+        provider_snapshot = self._provider_freshness_snapshot(forecast, local_now, local_tz)
+
+        return {
+            "forecast_fetched_at": fetched_at.astimezone(local_tz).isoformat() if fetched_at is not None else None,
+            "forecast_bundle_age_minutes": bundle_age_minutes,
+            "metar_observed_at": metar_observed_at.astimezone(local_tz).isoformat() if metar_observed_at is not None else None,
+            "metar_age_hours": metar_age_hours,
+            "metar_available": bool(metar_observed_at is not None),
+            "same_day_market": bool(market_context.get("local_date") == market_date.isoformat()),
+            **provider_snapshot,
+        }
+
+    def _freshness_gate(self, market_context, market_date):
+        if market_context.get("local_date") != market_date.isoformat():
+            return {"blocked": False, "reason": ""}
+
+        bundle_age_minutes = float(market_context.get("forecast_bundle_age_minutes", 9999.0))
+        local_hour = int(market_context.get("local_hour", -1))
+        has_station = bool(market_context.get("resolution_station_name"))
+        metar_age_hours = float(market_context.get("metar_age_hours", 9999.0))
+        metar_available = bool(market_context.get("metar_available", False))
+        provider_issue_age_minutes = float(market_context.get("provider_issue_age_minutes", 9999.0))
+        provider_issue_source = market_context.get("provider_issue_source") or ""
+
+        if bundle_age_minutes > 15.0:
+            return {
+                "blocked": True,
+                "reason": f"Forecast bundle is too old for same-day trading ({bundle_age_minutes:.1f} minutes old).",
+            }
+
+        if provider_issue_source in {"noaa_update_time", "noaa_generated_at", "noaa_points_update_time"} and provider_issue_age_minutes > 240.0:
+            return {
+                "blocked": True,
+                "reason": (
+                    f"Upstream forecast issue time looks stale for same-day trading "
+                    f"({provider_issue_age_minutes:.1f} minutes since provider update)."
+                ),
+            }
+
+        if has_station and metar_available and local_hour >= 15 and metar_age_hours > 2.0:
+            return {
+                "blocked": True,
+                "reason": f"Station observation is too stale for late same-day trading ({metar_age_hours:.2f} hours old).",
+            }
+
+        if has_station and metar_available and local_hour >= 12 and metar_age_hours > 3.0:
+            return {
+                "blocked": True,
+                "reason": f"Station observation is too stale for same-day trading ({metar_age_hours:.2f} hours old).",
+            }
+
+        return {"blocked": False, "reason": ""}
+
+    def _provider_freshness_snapshot(self, forecast, local_now, local_tz):
+        source_priority = ["noaa", "ecmwf", "hrrr", "gfs", "open_meteo"]
+        explicit_issue_sources = {"noaa_update_time", "noaa_generated_at", "noaa_points_update_time"}
+        selected = None
+
+        for source_name in source_priority:
+            payload = (forecast or {}).get(source_name)
+            if not isinstance(payload, dict):
+                continue
+            issued_at = self._parse_timestamp(payload.get("provider_issued_at"))
+            if issued_at is None:
+                continue
+            issue_source = payload.get("provider_issued_at_source") or "unknown"
+            candidate = {
+                "provider_primary_source": source_name,
+                "provider_issued_at": issued_at.astimezone(local_tz).isoformat(),
+                "provider_issue_age_minutes": max(
+                    0.0,
+                    (local_now - issued_at.astimezone(local_tz)).total_seconds() / 60.0,
+                ),
+                "provider_issue_source": issue_source,
+            }
+            if issue_source in explicit_issue_sources:
+                return candidate
+            if selected is None:
+                selected = candidate
+
+        if selected is not None:
+            return selected
+
+        return {
+            "provider_primary_source": None,
+            "provider_issued_at": None,
+            "provider_issue_age_minutes": 9999.0,
+            "provider_issue_source": None,
+        }
+
+    def _format_metar_freshness(self, market_context):
+        if not market_context.get("metar_available"):
+            return "METAR unavailable"
+        return f"METAR age={float(market_context.get('metar_age_hours', 9999.0)):.2f}h"
+
+    def _parse_timestamp(self, value, default_tz=timezone.utc):
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                return value
+            return value.replace(tzinfo=default_tz)
+        if isinstance(value, (int, float)):
+            try:
+                numeric = float(value)
+                if numeric > 1_000_000_000_000:
+                    numeric /= 1000.0
+                return datetime.fromtimestamp(numeric, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        if not value:
+            return None
+        raw_value = str(value).strip()
+        if re.fullmatch(r"\d+(?:\.\d+)?", raw_value):
+            try:
+                numeric = float(raw_value)
+                if numeric > 1_000_000_000_000:
+                    numeric /= 1000.0
+                return datetime.fromtimestamp(numeric, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        try:
+            normalized = raw_value.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            return parsed
+        return parsed.replace(tzinfo=default_tz)
 
     def _observation_progress(self, market_context):
         if market_context["days_to_resolution"] > 0:
@@ -1086,6 +1360,33 @@ class SignalGenerator:
 
     def _forecast_history_key(self, market_context, market_date):
         return f"{market_context.get('city','?')}|{market_context.get('country_code','?')}|{market_date.isoformat()}"
+
+    def _forecast_cache_key(self, lat, lon, is_us, location, market_date):
+        station_id = location.get("resolution_station_id") or location.get("station_id") or ""
+        timezone_name = location.get("timezone") or "UTC"
+        return (
+            round(float(lat), 4),
+            round(float(lon), 4),
+            bool(is_us),
+            str(market_date.isoformat()),
+            str(station_id).upper(),
+            str(timezone_name),
+        )
+
+    def _get_cached_forecast(self, lat, lon, is_us, location, market_date):
+        cache_key = self._forecast_cache_key(lat, lon, is_us, location, market_date)
+        if cache_key in self._run_forecast_cache:
+            return self._run_forecast_cache[cache_key]
+
+        forecast = self.weather.get_forecast(
+            lat,
+            lon,
+            is_us,
+            location=location,
+            market_date=market_date,
+        )
+        self._run_forecast_cache[cache_key] = forecast
+        return forecast
 
     def _load_forecast_history(self):
         try:
@@ -1109,6 +1410,28 @@ class SignalGenerator:
             if forecast_timezone:
                 return forecast_timezone
         return location.get("timezone") or "UTC"
+
+    def _filter_markets_for_current_local_date(self, markets):
+        filtered_markets = []
+        filtered_count = 0
+
+        for market in markets:
+            question = market.get("_display_question") or market.get("question", "")
+            location = self.markets.parse_market_location(question)
+            market_date = self.extract_market_date(question, market)
+
+            # Keep ambiguous markets so downstream skip accounting stays accurate.
+            if not location or not market_date:
+                filtered_markets.append(market)
+                continue
+
+            if self._is_current_local_market_date(location, market_date):
+                filtered_markets.append(market)
+                continue
+
+            filtered_count += 1
+
+        return filtered_markets, filtered_count
 
     def _classify_local_peak_stage(self, local_date, local_hour, market_date):
         if local_date < market_date:
