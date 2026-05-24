@@ -1,6 +1,8 @@
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -74,6 +76,25 @@ class BotOffsetPersistenceTests(unittest.TestCase):
         self.assertEqual(saved_offsets, [11, 12])
         self.assertEqual(bot.offset, 12)
         self.assertIn("Update handling failed", output.getvalue())
+
+    def test_offset_files_are_scoped_per_bot_token(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot = TelegramPollingBot.__new__(TelegramPollingBot)
+            bot.token = "prod-token"
+            bot.offset = 27
+            prod_file = Path(tmpdir) / "prod-offset.txt"
+            test_file = Path(tmpdir) / "test-offset.txt"
+
+            bot._offset_file_path = lambda: prod_file
+            bot._save_offset()
+
+            other_bot = TelegramPollingBot.__new__(TelegramPollingBot)
+            other_bot.token = "test-token"
+            other_bot._offset_file_path = lambda: test_file
+
+            self.assertEqual(prod_file.read_text(), "27")
+            self.assertFalse(test_file.exists())
+            self.assertEqual(other_bot._load_offset(), 0)
 
 
 class ExecutorLiveBehaviorTests(unittest.TestCase):

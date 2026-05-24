@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import argparse
+import hashlib
 import html
 import os
 import re
@@ -314,10 +315,16 @@ class TelegramPollingBot:
         self.crypto = CryptoManager()
         self.sessions: dict[str, dict[str, str]] = {}
         self.offset = self._load_offset()
+        if self.offset == 0:
+            self.offset = self._bootstrap_offset()
+
+    def _offset_file_path(self) -> Path:
+        token_hash = hashlib.sha256(self.token.encode("utf-8")).hexdigest()[:16]
+        return Path(__file__).resolve().parent.parent / "data" / "offsets" / f"{token_hash}.txt"
 
     def _load_offset(self) -> int:
-        """Load the last processed update offset from data/offset.txt to prevent message replay."""
-        offset_file = Path(__file__).resolve().parent.parent / "data" / "offset.txt"
+        """Load the last processed update offset for the active bot token."""
+        offset_file = self._offset_file_path()
         try:
             if offset_file.exists():
                 return int(offset_file.read_text().strip())
@@ -325,10 +332,24 @@ class TelegramPollingBot:
             pass
         return 0
 
-    def _save_offset(self):
-        """Save the current offset to prevent reprocessing messages on bot restart."""
-        offset_file = Path(__file__).resolve().parent.parent / "data" / "offset.txt"
+    def _bootstrap_offset(self) -> int:
+        """Skip stale queued updates the first time a new bot token is used."""
         try:
+            result = requests.get(f"{self.api_base}/getUpdates", params={"timeout": 0, "offset": -1, "limit": 1}, timeout=10)
+            result.raise_for_status()
+            body = result.json()
+            updates = body.get("result", []) if body.get("ok") else []
+            if updates:
+                return int(updates[-1]["update_id"]) + 1
+        except Exception as exc:
+            print(f"[BOT WARNING] Could not bootstrap offset: {exc}")
+        return 0
+
+    def _save_offset(self):
+        """Save the current offset for the active bot token."""
+        offset_file = self._offset_file_path()
+        try:
+            offset_file.parent.mkdir(parents=True, exist_ok=True)
             offset_file.write_text(str(self.offset))
         except Exception as exc:
             print(f"[BOT WARNING] Could not save offset: {exc}")
@@ -346,7 +367,7 @@ class TelegramPollingBot:
 
     def ensure_authorized_user_profile(self, user_id: str):
         normalized = str(user_id or "")
-        if not normalized or self.can_manage_whitelist(normalized):
+        if not normalized or not self.is_authorized_user(normalized):
             return
         try:
             self.db.ensure_user(normalized)

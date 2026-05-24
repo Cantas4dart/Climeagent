@@ -136,6 +136,60 @@ class BotWhitelistTests(unittest.TestCase):
         self.assertTrue(recorded["edited"])
         self.assertEqual(recorded["edited"][0][2], "help:123:True")
 
+    def test_admin_real_trade_callback_creates_profile_before_rendering(self):
+        bot = self.build_bot()
+        recorded = {"edited": [], "answered": [], "paper_updates": []}
+        users = {}
+        admin_id = WHITELIST_ADMIN_ID
+
+        def ensure_user(tg_id):
+            return users.setdefault(
+                tg_id,
+                SimpleNamespace(
+                    tg_id=tg_id,
+                    trading_active=0,
+                    paper_testing_active=0,
+                    auto_claim=1,
+                    private_key=None,
+                    api_key=None,
+                    api_secret=None,
+                    api_passphrase=None,
+                    funder_address=None,
+                    signature_type=None,
+                ),
+            )
+
+        def update_paper_testing_status(tg_id, active):
+            recorded["paper_updates"].append((tg_id, active))
+            ensure_user(tg_id).paper_testing_active = 1 if active else 0
+
+        bot.db = SimpleNamespace(
+            get_user=lambda tg_id: users.get(tg_id),
+            is_whitelisted=lambda tg_id: False,
+            ensure_user=ensure_user,
+            update_paper_testing_status=update_paper_testing_status,
+        )
+        bot.edit_message_text = lambda chat_id, message_id, text, reply_markup=None: recorded["edited"].append((chat_id, message_id, text)) or True
+        bot.answer_callback = lambda callback_query_id, text, show_alert=False: recorded["answered"].append((callback_query_id, text, show_alert))
+        bot.render_dashboard_page = lambda user_id, user, page, notice=None: {"text": f"{page}:{user_id}:{user is not None}:{notice}", "keyboard": None}
+
+        bot.handle_callback(
+            {
+                "id": "cb-admin",
+                "data": "positions:real_trade",
+                "from": {"id": int(admin_id)},
+                "message": {"chat": {"id": 1}, "message_id": 7},
+            }
+        )
+
+        self.assertIn(admin_id, users)
+        self.assertEqual(recorded["paper_updates"], [])
+        self.assertTrue(recorded["edited"])
+        self.assertEqual(
+            recorded["edited"][0][2],
+            f"setup:{admin_id}:True:Real Trade selected. Import a wallet, approve pUSD, and fund the trading wallet to continue.",
+        )
+
 
 class SetupKeyboardTests(unittest.TestCase):
     def test_setup_keyboard_keeps_remove_wallet_label_without_wallet(self):
