@@ -3,7 +3,7 @@
 This guide prepares Blocky for production-style hosting on a Linux VPS with:
 
 - live trading restricted to U.S. markets only
-- intelligence layer disabled for live signal decisions
+- raw ensemble probability used for live signal decisions
 - separate long-running services for brain, bot, executor, and settlement
 - hardened SSH, firewalling, backups, and least-privilege runtime
 
@@ -153,7 +153,7 @@ Current live behavior after the code changes:
 
 - non-U.S. markets are skipped at signal generation time
 - live decision probability uses the raw ensemble output
-- intelligence-driven live probability adjustments are disabled
+- no separate intelligence/learning layer is used in live decisions
 
 ## 5. Directory Permissions
 
@@ -267,7 +267,6 @@ Back up at least:
 - `data/users.db`
 - `data/signals.json`
 - `data/forecast_history.json`
-- `data/intelligence_state.json`
 - `data/learning_feedback.jsonl`
 
 Create a simple backup directory:
@@ -290,7 +289,6 @@ cp /opt/blocky-polymarket/.env "$DEST/"
 cp /opt/blocky-polymarket/data/users.db "$DEST/"
 cp /opt/blocky-polymarket/data/signals.json "$DEST/" 2>/dev/null || true
 cp /opt/blocky-polymarket/data/forecast_history.json "$DEST/" 2>/dev/null || true
-cp /opt/blocky-polymarket/data/intelligence_state.json "$DEST/" 2>/dev/null || true
 cp /opt/blocky-polymarket/data/learning_feedback.jsonl "$DEST/" 2>/dev/null || true
 find /opt/blocky-backups -maxdepth 1 -mindepth 1 -type d | sort | head -n -14 | xargs -r rm -rf
 EOF

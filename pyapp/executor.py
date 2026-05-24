@@ -347,9 +347,6 @@ class TradeExecutor:
 
     def _temperature_analysis_entry_json(self, signal: dict[str, Any]) -> str | None:
         forecast_data = signal.get("forecast_data")
-        if not isinstance(forecast_data, dict) or not forecast_data:
-            return None
-
         target = signal.get("target") if isinstance(signal.get("target"), dict) else {}
         payload = {
             "market_id": signal.get("market_id"),
@@ -365,9 +362,17 @@ class TradeExecutor:
             "location_lon": signal.get("location_lon"),
             "temperature_unit": signal.get("temperature_unit"),
             "target": target,
-            "forecast_data": forecast_data,
+            "forecast_data": forecast_data if isinstance(forecast_data, dict) else {},
             "entry_timestamp": signal.get("timestamp"),
         }
+        has_resolution_context = any(
+            payload.get(key)
+            for key in ("station_url", "station_id", "city", "location_lat", "location_lon", "market_date")
+        )
+        has_target = bool(target)
+        has_forecast = bool(payload["forecast_data"])
+        if not (has_resolution_context or has_target or has_forecast):
+            return None
         return json.dumps(payload)
 
     def assess_conflict(self, trade: Any, state: dict[str, Any]) -> dict[str, Any]:

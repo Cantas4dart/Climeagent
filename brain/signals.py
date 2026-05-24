@@ -60,13 +60,7 @@ class SignalGenerator:
         self.log(f"\n[SIGNAL] {'='*55}")
         self.log(f"[SIGNAL]   SCAN #{self.run_count} -- {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         self.log(f"[SIGNAL] {'='*55}")
-        intelligence_summary = {
-            "enabled": False,
-            "trained_samples": 0,
-            "recent_win_rate": 0.0,
-            "recent_avg_brier": 0.0,
-        }
-        self.log("[SIGNAL] Intelligence layer disabled for live trading.")
+        self.log("[SIGNAL] Live decision layer: raw ensemble model only.")
         if self.us_only_trading:
             self.log("[SIGNAL] Live trading region filter: US-only.")
 
@@ -305,7 +299,7 @@ class SignalGenerator:
                     learned_prob = avg_prob
                     self.log(
                         f"[SIGNAL] | Decision Prob: {learned_prob:.2%} "
-                        "(intelligence disabled, using raw ensemble probability)"
+                        "(using raw ensemble probability)"
                     )
 
                     decision = self.model.evaluate_market_opportunity(
@@ -577,7 +571,6 @@ class SignalGenerator:
             "discovery": discovery_diagnostics,
             "skipped": skipped,
             "elapsed_seconds": round(elapsed, 1),
-            "intelligence": intelligence_summary,
         }, market_states=market_states)
         self._save_forecast_history()
 

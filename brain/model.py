@@ -381,7 +381,7 @@ class TradingModel:
 
     def _price_band(self, market_price):
         """
-        Keep price-banding aligned with the intelligence metadata buckets so
+        Keep price-banding aligned with the stored signal metadata buckets so
         model-side veto patterns and paper-trade review are speaking the same
         language.
         """
