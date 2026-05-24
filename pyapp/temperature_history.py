@@ -11,7 +11,7 @@ import requests
 class StationHistoryClient:
     def __init__(self):
         self.session = requests.Session()
-        self.user_agent = {"User-Agent": "blocky-polymarket-temperature-analysis/1.0"}
+        self.user_agent = {"User-Agent": "climeagent-temperature-analysis/1.0"}
 
     def fetch_daily_actual_temperature(self, entry_payload: dict[str, Any]) -> dict[str, Any]:
         market_date = self._coerce_date(entry_payload.get("market_date"))
@@ -116,39 +116,55 @@ class StationHistoryClient:
         return hostname in {"www.wunderground.com", "wunderground.com"}
 
     def _fetch_open_meteo_archive(self, lat: float, lon: float, market_date: date, entry_payload: dict[str, Any]) -> dict[str, Any] | None:
-        params = {
+        timezone_candidates = []
+        explicit_timezone = str(entry_payload.get("timezone") or "").strip()
+        if explicit_timezone:
+            timezone_candidates.append(explicit_timezone)
+        timezone_candidates.extend(["auto", "UTC"])
+
+        base_params = {
             "latitude": lat,
             "longitude": lon,
             "start_date": market_date.isoformat(),
             "end_date": market_date.isoformat(),
             "daily": "temperature_2m_max",
-            "timezone": entry_payload.get("timezone") or "auto",
         }
         if entry_payload.get("temperature_unit") == "fahrenheit":
-            params["temperature_unit"] = "fahrenheit"
+            base_params["temperature_unit"] = "fahrenheit"
 
-        response = self.session.get(
-            "https://archive-api.open-meteo.com/v1/archive",
-            params=params,
-            headers=self.user_agent,
-            timeout=20,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        daily = payload.get("daily") or {}
-        values = daily.get("temperature_2m_max") or []
-        times = daily.get("time") or []
-        if not values:
-            return None
-        actual_value = float(values[0])
-        observed_at = f"{times[0]}T23:59:59" if times else None
-        return {
-            "actual_temperature": round(actual_value, 2),
-            "actual_temperature_unit": "fahrenheit" if params.get("temperature_unit") == "fahrenheit" else "celsius",
-            "actual_observed_at": observed_at,
-            "actual_source": "open_meteo_archive_station_coords",
-            "actual_source_status": "resolved",
-        }
+        last_error = None
+        for timezone_name in timezone_candidates:
+            params = dict(base_params)
+            params["timezone"] = timezone_name
+            try:
+                response = self.session.get(
+                    "https://archive-api.open-meteo.com/v1/archive",
+                    params=params,
+                    headers=self.user_agent,
+                    timeout=20,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                daily = payload.get("daily") or {}
+                values = daily.get("temperature_2m_max") or []
+                times = daily.get("time") or []
+                if not values:
+                    continue
+                actual_value = float(values[0])
+                observed_at = f"{times[0]}T23:59:59" if times else None
+                return {
+                    "actual_temperature": round(actual_value, 2),
+                    "actual_temperature_unit": "fahrenheit" if params.get("temperature_unit") == "fahrenheit" else "celsius",
+                    "actual_observed_at": observed_at,
+                    "actual_source": "open_meteo_archive_station_coords",
+                    "actual_source_status": "resolved",
+                }
+            except Exception as exc:
+                last_error = exc
+                continue
+        if last_error:
+            raise last_error
+        return None
 
     def _find_numeric_key(self, node: Any, keys: set[str]) -> float | None:
         if isinstance(node, dict):

@@ -1,0 +1,23 @@
+[Unit]
+Description=Climeagent trade executor
+After=network-online.target climeagent-brain.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=climeagent
+Group=climeagent
+WorkingDirectory=/opt/climeagent
+EnvironmentFile=/opt/climeagent/.env
+ExecStart=/opt/climeagent/.venv/bin/python -m pyapp.executor
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/climeagent/data
+
+[Install]
+WantedBy=multi-user.target

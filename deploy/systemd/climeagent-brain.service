@@ -1,0 +1,23 @@
+[Unit]
+Description=Climeagent signal brain
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=climeagent
+Group=climeagent
+WorkingDirectory=/opt/climeagent
+EnvironmentFile=/opt/climeagent/.env
+ExecStart=/opt/climeagent/.venv/bin/python -u brain/main.py
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/climeagent/data
+
+[Install]
+WantedBy=multi-user.target

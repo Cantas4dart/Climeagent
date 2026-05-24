@@ -1,6 +1,6 @@
-# Blocky Polymarket VPS Setup
+# Climeagent VPS Setup
 
-This guide prepares Blocky for production-style hosting on a Linux VPS with:
+This guide prepares Climeagent for production-style hosting on a Linux VPS with:
 
 - live trading restricted to U.S. markets only
 - raw ensemble probability used for live signal decisions
@@ -44,8 +44,8 @@ sudo dpkg-reconfigure --priority=low unattended-upgrades
 Create a dedicated runtime user:
 
 ```bash
-sudo adduser --disabled-password --gecos "" blocky
-sudo usermod -aG sudo blocky
+sudo adduser --disabled-password --gecos "" climeagent
+sudo usermod -aG sudo climeagent
 ```
 
 Use SSH keys only:
@@ -71,7 +71,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 X11Forwarding no
-AllowUsers blocky
+AllowUsers climeagent
 ```
 
 Then reload SSH:
@@ -97,14 +97,14 @@ If your cloud provider has a network firewall or security group, also restrict S
 Switch to the service user:
 
 ```bash
-sudo -iu blocky
+sudo -iu climeagent
 ```
 
 Clone to a stable location:
 
 ```bash
-git clone <your-repo-url> /opt/blocky-polymarket
-cd /opt/blocky-polymarket
+git clone <your-repo-url> /opt/climeagent
+cd /opt/climeagent
 ```
 
 Create the virtual environment and install dependencies:
@@ -160,9 +160,9 @@ Current live behavior after the code changes:
 Make sure the runtime user owns the app and writable data:
 
 ```bash
-sudo chown -R blocky:blocky /opt/blocky-polymarket
-mkdir -p /opt/blocky-polymarket/data
-chmod 700 /opt/blocky-polymarket/data
+sudo chown -R climeagent:climeagent /opt/climeagent
+mkdir -p /opt/climeagent/data
+chmod 700 /opt/climeagent/data
 ```
 
 ## 6. Preflight Checks
@@ -170,7 +170,7 @@ chmod 700 /opt/blocky-polymarket/data
 Run one-shot checks before enabling background services:
 
 ```bash
-cd /opt/blocky-polymarket
+cd /opt/climeagent
 source .venv/bin/activate
 python -m pytest tests/test_brain_signal_location.py tests/test_brain_exact_markets.py tests/test_temperature_analysis.py -q
 python -u brain/main.py
@@ -191,41 +191,41 @@ python -m pyapp.settlement --once
 Copy the provided service units:
 
 ```bash
-sudo cp deploy/systemd/blocky-*.service /etc/systemd/system/
+sudo cp deploy/systemd/climeagent-*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
 Enable and start them:
 
 ```bash
-sudo systemctl enable --now blocky-brain.service
-sudo systemctl enable --now blocky-bot.service
-sudo systemctl enable --now blocky-executor.service
-sudo systemctl enable --now blocky-settlement.service
+sudo systemctl enable --now climeagent-brain.service
+sudo systemctl enable --now climeagent-bot.service
+sudo systemctl enable --now climeagent-executor.service
+sudo systemctl enable --now climeagent-settlement.service
 ```
 
 Check status:
 
 ```bash
-sudo systemctl status blocky-brain.service
-sudo systemctl status blocky-bot.service
-sudo systemctl status blocky-executor.service
-sudo systemctl status blocky-settlement.service
+sudo systemctl status climeagent-brain.service
+sudo systemctl status climeagent-bot.service
+sudo systemctl status climeagent-executor.service
+sudo systemctl status climeagent-settlement.service
 ```
 
 Follow logs:
 
 ```bash
-journalctl -u blocky-brain.service -f
-journalctl -u blocky-bot.service -f
-journalctl -u blocky-executor.service -f
-journalctl -u blocky-settlement.service -f
+journalctl -u climeagent-brain.service -f
+journalctl -u climeagent-bot.service -f
+journalctl -u climeagent-executor.service -f
+journalctl -u climeagent-settlement.service -f
 ```
 
 Restart after a deploy:
 
 ```bash
-sudo systemctl restart blocky-brain.service blocky-bot.service blocky-executor.service blocky-settlement.service
+sudo systemctl restart climeagent-brain.service climeagent-bot.service climeagent-executor.service climeagent-settlement.service
 ```
 
 Why `systemd` instead of one bundled launcher:
@@ -272,27 +272,27 @@ Back up at least:
 Create a simple backup directory:
 
 ```bash
-mkdir -p /opt/blocky-backups
-chmod 700 /opt/blocky-backups
+mkdir -p /opt/climeagent-backups
+chmod 700 /opt/climeagent-backups
 ```
 
 Example daily backup script:
 
 ```bash
-cat > /opt/blocky-polymarket/deploy/backup.sh <<'EOF'
+cat > /opt/climeagent/deploy/backup.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-DEST="/opt/blocky-backups/$STAMP"
+DEST="/opt/climeagent-backups/$STAMP"
 mkdir -p "$DEST"
-cp /opt/blocky-polymarket/.env "$DEST/"
-cp /opt/blocky-polymarket/data/users.db "$DEST/"
-cp /opt/blocky-polymarket/data/signals.json "$DEST/" 2>/dev/null || true
-cp /opt/blocky-polymarket/data/forecast_history.json "$DEST/" 2>/dev/null || true
-cp /opt/blocky-polymarket/data/learning_feedback.jsonl "$DEST/" 2>/dev/null || true
-find /opt/blocky-backups -maxdepth 1 -mindepth 1 -type d | sort | head -n -14 | xargs -r rm -rf
+cp /opt/climeagent/.env "$DEST/"
+cp /opt/climeagent/data/users.db "$DEST/"
+cp /opt/climeagent/data/signals.json "$DEST/" 2>/dev/null || true
+cp /opt/climeagent/data/forecast_history.json "$DEST/" 2>/dev/null || true
+cp /opt/climeagent/data/learning_feedback.jsonl "$DEST/" 2>/dev/null || true
+find /opt/climeagent-backups -maxdepth 1 -mindepth 1 -type d | sort | head -n -14 | xargs -r rm -rf
 EOF
-chmod 700 /opt/blocky-polymarket/deploy/backup.sh
+chmod 700 /opt/climeagent/deploy/backup.sh
 ```
 
 Schedule it:
@@ -304,7 +304,7 @@ crontab -e
 Add:
 
 ```text
-15 2 * * * /opt/blocky-polymarket/deploy/backup.sh
+15 2 * * * /opt/climeagent/deploy/backup.sh
 ```
 
 Prefer also syncing encrypted backups to off-box storage.
@@ -314,13 +314,13 @@ Prefer also syncing encrypted backups to off-box storage.
 On the VPS:
 
 ```bash
-cd /opt/blocky-polymarket
+cd /opt/climeagent
 git pull
 source .venv/bin/activate
 pip install -r requirements.txt
 npm install
 python -m pytest tests/test_brain_signal_location.py tests/test_brain_exact_markets.py tests/test_temperature_analysis.py -q
-sudo systemctl restart blocky-brain.service blocky-bot.service blocky-executor.service blocky-settlement.service
+sudo systemctl restart climeagent-brain.service climeagent-bot.service climeagent-executor.service climeagent-settlement.service
 ```
 
 If Python dependencies did not change, you can skip `pip install`.
@@ -348,7 +348,7 @@ For your current partial rollout:
 - firewall enabled
 - fail2ban enabled
 - unattended upgrades enabled
-- dedicated `blocky` user created
+- dedicated `climeagent` user created
 - `.env` populated and chmod `600`
 - U.S.-only live trading enabled
 - tests passing on the VPS

@@ -336,7 +336,7 @@ class SettlementMonitor:
 
     def run_loop(self):
         print("-----------------------------------------")
-        print("Blocky Python Settlement Monitor Started (24/7)")
+        print("Climeagent Python Settlement Monitor Started (24/7)")
         print("-----------------------------------------")
         print(f"[PYSETTLE] Startup check in {STARTUP_SETTLEMENT_DELAY_SECONDS}s.")
         print(f"[PYSETTLE] Recurring settlement checks every {SETTLEMENT_CHECK_INTERVAL_SECONDS // 60} minutes.")

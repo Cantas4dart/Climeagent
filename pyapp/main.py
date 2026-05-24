@@ -55,7 +55,7 @@ def run_selected(run_bot: bool, run_executor: bool, run_settlement: bool, run_on
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Python app-side Blocky components.")
+    parser = argparse.ArgumentParser(description="Run Python app-side Climeagent components.")
     parser.add_argument("--bot", action="store_true", help="Run the Python Telegram bot")
     parser.add_argument("--executor", action="store_true", help="Run the Python executor")
     parser.add_argument("--settlement", action="store_true", help="Run the Python settlement monitor")

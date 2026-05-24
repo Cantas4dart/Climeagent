@@ -418,7 +418,7 @@ class TelegramPollingBot:
 
     def run(self):
         print("--------------------------")
-        print("Blocky Polymarket Python Bot Starting...")
+        print("Climeagent Python Bot Starting...")
         print("--------------------------")
         while True:
             try:

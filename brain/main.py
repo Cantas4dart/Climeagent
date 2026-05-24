@@ -1,5 +1,5 @@
 """
-Blocky Polymarket - Brain (Signal Engine)
+Climeagent - Brain (Signal Engine)
 Runs on a loop, scanning weather markets and generating trade signals.
 """
 import time
@@ -22,7 +22,7 @@ def main():
         return
 
     safe_print("=" * 50)
-    safe_print("  Blocky Brain - Calibrated Signal Engine v2")
+    safe_print("  Climeagent Brain - Signal Engine")
     safe_print("=" * 50)
 
     gen = SignalGenerator()

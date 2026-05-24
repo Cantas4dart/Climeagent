@@ -58,7 +58,7 @@ class TradeExecutor:
 
     def run_loop(self):
         print("-----------------------------------------")
-        print("Blocky Python Execution Loop Started (24/7 Mode)")
+        print("Climeagent Python Execution Loop Started (24/7 Mode)")
         print("-----------------------------------------")
         while True:
             try:
