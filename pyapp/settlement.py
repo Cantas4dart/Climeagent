@@ -103,12 +103,57 @@ class SettlementMonitor:
     def _load_temperature_analysis_entry(self, trade: Trade | PaperTrade) -> dict[str, Any] | None:
         raw = getattr(trade, "temperature_analysis_entry", None)
         if not raw:
-            return None
+            return self._reconstruct_temperature_analysis_entry(trade)
         try:
             payload = json.loads(raw)
-            return payload if isinstance(payload, dict) else None
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            pass
+        return self._reconstruct_temperature_analysis_entry(trade)
+
+    def _reconstruct_temperature_analysis_entry(self, trade: Trade | PaperTrade) -> dict[str, Any] | None:
+        raw_learning = getattr(trade, "learning_features", None)
+        if not raw_learning:
+            return None
+        try:
+            payload = json.loads(raw_learning)
         except json.JSONDecodeError:
             return None
+        if not isinstance(payload, dict):
+            return None
+
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        city = meta.get("city")
+        station_url = meta.get("resolution_station_url")
+        station_name = meta.get("resolution_station_name")
+        station_id = meta.get("resolution_station_id")
+        timezone_name = meta.get("timezone")
+        lat = meta.get("location_lat")
+        lon = meta.get("location_lon")
+        country_code = meta.get("country_code")
+
+        if not any([city, station_url, station_id, timezone_name, lat, lon, country_code]):
+            return None
+
+        return {
+            "market_id": getattr(trade, "market_id", None),
+            "condition_id": getattr(trade, "condition_id", None),
+            "market_date": getattr(trade, "market_date", None),
+            "city": city,
+            "country_code": country_code,
+            "timezone": timezone_name,
+            "station_id": station_id,
+            "station_name": station_name,
+            "station_url": station_url,
+            "location_lat": lat,
+            "location_lon": lon,
+            "temperature_unit": meta.get("temperature_unit"),
+            "target": {},
+            "forecast_data": {},
+            "entry_timestamp": getattr(trade, "timestamp", None),
+            "reconstructed_from": "learning_features",
+        }
 
     def _target_bounds(self, target: dict[str, Any]) -> tuple[str | None, float | None, float | None]:
         target_type = str(target.get("type") or "").strip().lower() or None
@@ -130,7 +175,7 @@ class SettlementMonitor:
             if low is None or high is None:
                 return None
             if float(low).is_integer() and float(high).is_integer():
-                return 1 if low <= actual_temperature < (high + 1.0) else 0
+                return 1 if low <= actual_temperature <= (high + 0.9) else 0
             return 1 if low <= actual_temperature <= high else 0
 
         if target_type == "exact":
@@ -146,6 +191,8 @@ class SettlementMonitor:
             if value is None:
                 return None
             if direction == "below":
+                if float(value).is_integer():
+                    return 1 if actual_temperature <= (value + 0.9) else 0
                 return 1 if actual_temperature <= value else 0
             return 1 if actual_temperature >= value else 0
 
@@ -244,6 +291,10 @@ class SettlementMonitor:
                     4,
                 )
 
+        stored_actual_source_status = actual_source_status
+        if target_type is not None and not supported_target:
+            stored_actual_source_status = "unsupported_market_shape"
+
         self.db.upsert_temperature_settlement_analysis(
             {
                 "trade_source": trade_source,
@@ -274,7 +325,7 @@ class SettlementMonitor:
                 "actual_temperature_unit": actual_temperature_unit,
                 "actual_observed_at": actual_observed_at,
                 "actual_source": actual_source,
-                "actual_source_status": actual_source_status if supported_target else "unsupported_market_shape",
+                "actual_source_status": stored_actual_source_status,
                 "forecast_error_avg": forecast_error_avg,
                 "forecast_error_by_source_json": forecast_error_by_source_json,
                 "rounded_settlement_value": rounded_settlement_value,

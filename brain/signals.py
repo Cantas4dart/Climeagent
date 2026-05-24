@@ -11,7 +11,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from weather import WeatherClient
 from markets import MarketClient
-from intelligence import WeatherIntelligenceAgent
 from model import TradingModel
 try:
     from .console import safe_print
@@ -26,12 +25,12 @@ class SignalGenerator:
         self.weather = WeatherClient()
         self.markets = MarketClient()
         self.model = TradingModel()
-        self.intelligence = WeatherIntelligenceAgent()
         self.data_path = os.path.join(os.path.dirname(__file__), data_path)
         self.forecast_history_path = os.path.join(os.path.dirname(__file__), "../data/forecast_history.json")
         self.forecast_history = self._load_forecast_history()
         self.run_count = 0
         self._run_forecast_cache = {}
+        self.us_only_trading = os.getenv("BLOCKY_US_ONLY_TRADING", "1").strip().lower() not in {"0", "false", "no"}
         self.month_map = {
             "january": 1,
             "february": 2,
@@ -61,13 +60,15 @@ class SignalGenerator:
         self.log(f"\n[SIGNAL] {'='*55}")
         self.log(f"[SIGNAL]   SCAN #{self.run_count} -- {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         self.log(f"[SIGNAL] {'='*55}")
-        self.intelligence.refresh_from_feedback()
-        intelligence_summary = self.intelligence.summarize()
-        self.log(
-            f"[SIGNAL] Intelligence samples={intelligence_summary['trained_samples']} "
-            f"| win_rate={intelligence_summary['recent_win_rate']:.2%} "
-            f"| brier={intelligence_summary['recent_avg_brier']:.4f}"
-        )
+        intelligence_summary = {
+            "enabled": False,
+            "trained_samples": 0,
+            "recent_win_rate": 0.0,
+            "recent_avg_brier": 0.0,
+        }
+        self.log("[SIGNAL] Intelligence layer disabled for live trading.")
+        if self.us_only_trading:
+            self.log("[SIGNAL] Live trading region filter: US-only.")
 
         # Step 0: Fetch markets
         self.log(f"\n[SIGNAL] --- Phase 1: Market Discovery ---")
@@ -156,6 +157,11 @@ class SignalGenerator:
                     f"[SIGNAL] | Location: {location['city']}, {location.get('country') or '?'} "
                     f"| ({lat}, {lon}), US={is_us}, TZ={location.get('timezone') or 'UTC'}"
                 )
+                if not self._is_live_tradeable_location(location):
+                    self.log("[SIGNAL] | >> SKIP: Non-US market blocked while live trading remains US-only.")
+                    skipped["no_location"] += 1
+                    self.log(f"[SIGNAL] +------------------------------------------")
+                    continue
 
                 # Step 2: Parse exact market date
                 market_date = self.extract_market_date(question, market)
@@ -296,36 +302,10 @@ class SignalGenerator:
                         days_to_resolution,
                         local_peak_stage=market_context["local_peak_stage"],
                     )
-                    intelligence = self.intelligence.generate_signal_adjustment({
-                        "base_prob": avg_prob,
-                        "market_yes_price": market_price,
-                        "spread": spread,
-                        "days_to_resolution": days_to_resolution,
-                        "liquidity": sanity["snapshot"].get("liquidity"),
-                        "volume_24h": sanity["snapshot"].get("volume_24h"),
-                        "forecast_data": forecast_data,
-                        "target": target,
-                        "regime": provisional_regime,
-                        "local_peak_stage": market_context["local_peak_stage"],
-                        "local_peak_stage_detail": market_context["local_peak_stage_detail"],
-                        "local_hour": market_context["local_hour"],
-                        "timezone": market_context["timezone"],
-                        "continent": market_context["continent"],
-                        "city": market_context["city"],
-                        "forecast_revision_delta": market_context["forecast_revision_delta"],
-                        "forecast_revision_volatility": market_context["forecast_revision_volatility"],
-                        "forecast_revision_direction": market_context["forecast_revision_direction"],
-                        "settlement_risk": market_context["settlement_risk"],
-                        "rounding_risk": market_context["rounding_risk"],
-                        "station_mismatch_risk": market_context["station_mismatch_risk"],
-                        "observation_progress": market_context["observation_progress"],
-                    })
-                    learned_prob = intelligence["decision_prob"]
+                    learned_prob = avg_prob
                     self.log(
-                        f"[SIGNAL] | Intelligence Prob: {learned_prob:.2%} "
-                        f"(raw={intelligence['calibrated_prob']:.2%}, "
-                        f"blend={intelligence['model_blend']:.2f}, "
-                        f"edge score={intelligence['inefficiency_score']:.2%})"
+                        f"[SIGNAL] | Decision Prob: {learned_prob:.2%} "
+                        "(intelligence disabled, using raw ensemble probability)"
                     )
 
                     decision = self.model.evaluate_market_opportunity(
@@ -336,7 +316,6 @@ class SignalGenerator:
                             "days_to_resolution": days_to_resolution,
                             "market_date": market_date.isoformat(),
                             "target": target,
-                            "intelligence_confidence": intelligence["learning_confidence"],
                             "intelligence_prob": learned_prob,
                             "local_peak_stage": market_context["local_peak_stage"],
                             "local_peak_stage_detail": market_context["local_peak_stage_detail"],
@@ -345,7 +324,11 @@ class SignalGenerator:
                             "utc_offset_hours": market_context["utc_offset_hours"],
                             "continent": market_context["continent"],
                             "city": market_context["city"],
+                            "country_code": market_context.get("country_code"),
                             "temp_dispersion": market_context.get("temp_dispersion", 0.0),
+                            "forecast_avg": market_context.get("forecast_avg"),
+                            "forecast_min": market_context.get("forecast_min"),
+                            "forecast_max": market_context.get("forecast_max"),
                             "calibration_buckets": market_context.get("calibration_buckets", {}),
                             "forecast_revision_delta": market_context["forecast_revision_delta"],
                             "forecast_revision_volatility": market_context["forecast_revision_volatility"],
@@ -356,6 +339,7 @@ class SignalGenerator:
                             "observation_progress": market_context["observation_progress"],
                             "exact_rounding_consensus": market_context.get("exact_rounding_consensus", 0.0),
                             "exact_rounding_protected": bool(market_context.get("exact_rounding_protected", False)),
+                            "exact_target_distance": market_context.get("exact_target_distance"),
                         }
                     )
                     self.log(
@@ -364,55 +348,22 @@ class SignalGenerator:
                     )
                     self.log(f"[SIGNAL] | Edge: {decision['edge']:.2%} (abs: {decision['abs_edge']:.2%})")
                     entry_timing_gate = self._entry_timing_gate(market_context, market_date)
-                    learning_payload = {
-                        **intelligence["training_payload"],
-                        "meta": {
-                            **intelligence["training_payload"].get("meta", {}),
-                            "pattern_veto": "yes" if decision.get("yes_veto_applied") else ("no" if decision.get("no_veto_applied") else "none"),
-                            "veto_side": "YES" if decision.get("yes_veto_applied") else ("NO" if decision.get("no_veto_applied") else "NONE"),
-                            "city": market_context["city"],
-                            "country": market_context["country"],
-                            "country_code": market_context["country_code"],
-                            "continent": market_context["continent"],
-                            "timezone": market_context["timezone"],
-                            "utc_offset_hours": market_context["utc_offset_hours"],
-                            "local_now": market_context["local_now"],
-                            "local_hour": market_context["local_hour"],
-                            "local_date": market_context["local_date"],
-                            "local_peak_stage": market_context["local_peak_stage"],
-                            "local_peak_stage_detail": market_context["local_peak_stage_detail"],
-                            "forecast_revision_direction": market_context["forecast_revision_direction"],
-                            "forecast_fetched_at": market_context.get("forecast_fetched_at"),
-                            "forecast_bundle_age_minutes": round(market_context.get("forecast_bundle_age_minutes", 0.0), 3),
-                            "provider_primary_source": market_context.get("provider_primary_source"),
-                            "provider_issued_at": market_context.get("provider_issued_at"),
-                            "provider_issue_age_minutes": round(market_context.get("provider_issue_age_minutes", 0.0), 3),
-                            "provider_issue_source": market_context.get("provider_issue_source"),
-                            "metar_observed_at": market_context.get("metar_observed_at"),
-                            "metar_age_hours": round(market_context.get("metar_age_hours", 0.0), 3),
-                            "resolution_source": market_context.get("resolution_source"),
-                            "resolution_station_name": market_context.get("resolution_station_name"),
-                            "resolution_station_url": market_context.get("resolution_station_url"),
-                            "resolution_station_id": market_context.get("resolution_station_id"),
-                            "resolution_coordinates_applied": bool(market_context.get("resolution_coordinates_applied")),
-                            "entry_timing_blocked": bool(entry_timing_gate["blocked"]),
-                            "entry_timing_reason": entry_timing_gate["reason"],
-                        },
-                        "decision": {
-                            "action": decision["action"],
-                            "adjusted_model_prob": round(decision["adjusted_model_prob"], 6),
-                            "pre_pattern_veto_prob": round(
-                                decision.get("pre_pattern_veto_prob", decision["adjusted_model_prob"]),
-                                6,
-                            ),
-                            "pattern_veto_applied": bool(decision.get("pattern_veto_applied", False)),
-                            "yes_veto_applied": bool(decision.get("yes_veto_applied", False)),
-                            "no_veto_applied": bool(decision.get("no_veto_applied", False)),
-                        },
-                    }
+                    learning_payload = self._build_learning_payload(
+                        avg_prob=avg_prob,
+                        market_price=market_price,
+                        spread=spread,
+                        days_to_resolution=days_to_resolution,
+                        provisional_regime=provisional_regime,
+                        target=target,
+                        market_context=market_context,
+                        sanity=sanity,
+                        entry_timing_gate=entry_timing_gate,
+                        decision=decision,
+                    )
 
+                    final_yes_prob = float(decision.get("calibrated_model_prob", decision["adjusted_model_prob"]))
                     trade_side_price = sanity["yes_price"] if decision["action"] == "BUY_YES" else sanity["no_price"]
-                    trade_side_market_prob = decision["adjusted_model_prob"] if decision["action"] == "BUY_YES" else (1 - decision["adjusted_model_prob"])
+                    trade_side_market_prob = final_yes_prob if decision["action"] == "BUY_YES" else (1 - final_yes_prob)
                     market_states.append({
                         "market_id": market_id,
                         "condition_id": condition_id,
@@ -444,6 +395,7 @@ class SignalGenerator:
                         "rounding_risk": round(market_context["rounding_risk"], 4),
                         "station_mismatch_risk": round(market_context["station_mismatch_risk"], 4),
                         "observation_progress": round(market_context["observation_progress"], 4),
+                        "exact_target_distance": round(market_context.get("exact_target_distance", 0.0), 4) if market_context.get("exact_target_distance") is not None else None,
                         "resolution_source": market_context.get("resolution_source"),
                         "resolution_station_name": market_context.get("resolution_station_name"),
                         "resolution_station_url": market_context.get("resolution_station_url"),
@@ -453,7 +405,9 @@ class SignalGenerator:
                         "entry_timing_reason": entry_timing_gate["reason"],
                         "raw_model_prob": round(avg_prob, 4),
                         "intelligence_prob": round(learned_prob, 4),
-                        "adjusted_model_prob": round(decision["adjusted_model_prob"], 4),
+                        "adjusted_model_prob": round(final_yes_prob, 4),
+                        "pre_calibration_model_prob": round(decision["adjusted_model_prob"], 4),
+                        "calibrated_model_prob": round(final_yes_prob, 4),
                         "market_price_yes": round(sanity["yes_price"], 4),
                         "market_price_no": round(sanity["no_price"], 4),
                         "trade_side_market_price": round(trade_side_price, 4),
@@ -473,9 +427,9 @@ class SignalGenerator:
                         "base_required_edge": round(decision.get("base_required_edge", decision["required_edge"]), 4),
                         "price_band": decision.get("price_band"),
                         "required_confidence": round(decision.get("required_confidence", 0.0), 4),
-                        "learning_confidence": round(intelligence["learning_confidence"], 4),
-                        "inefficiency_score": round(intelligence["inefficiency_score"], 4),
-                        "segment_adjustment": round(intelligence["segment_adjustment"], 4),
+                        "learning_confidence": 0.0,
+                        "inefficiency_score": 0.0,
+                        "segment_adjustment": 0.0,
                         "action": decision["action"],
                         "should_trade": decision["should_trade"],
                         "days_to_resolution": days_to_resolution,
@@ -524,12 +478,15 @@ class SignalGenerator:
                             "entry_timing_reason": entry_timing_gate["reason"],
                             "target": target,
                             "forecast_data": {k: round(v, 2) for k, v in forecast_data.items()},
+                            "exact_target_distance": round(market_context.get("exact_target_distance", 0.0), 4) if market_context.get("exact_target_distance") is not None else None,
                             "temperature_unit": "fahrenheit" if market_context.get("country_code") == "US" else "celsius",
                             "location_lat": round(float(market_context.get("lat")), 5) if market_context.get("lat") is not None else None,
                             "location_lon": round(float(market_context.get("lon")), 5) if market_context.get("lon") is not None else None,
                             "avg_model_prob": round(avg_prob, 4),
                             "intelligence_prob": round(learned_prob, 4),
-                            "adjusted_model_prob": round(decision["adjusted_model_prob"], 4),
+                            "adjusted_model_prob": round(final_yes_prob, 4),
+                            "pre_calibration_model_prob": round(decision["adjusted_model_prob"], 4),
+                            "calibrated_model_prob": round(final_yes_prob, 4),
                             "market_price_yes": round(sanity["yes_price"], 4),
                             "market_price_no": round(sanity["no_price"], 4),
                             "market_price": round(market_price, 4),
@@ -545,6 +502,7 @@ class SignalGenerator:
                             "conviction": spread <= decision["spread_limit"],
                             "regime": decision["regime"],
                             "bust_risk": round(decision["bust_risk"], 4),
+                            "exact_target_distance": round(market_context.get("exact_target_distance", 0.0), 4) if market_context.get("exact_target_distance") is not None else None,
                             "pre_yes_veto_prob": round(decision.get("pre_yes_veto_prob", decision["adjusted_model_prob"]), 4),
                             "pre_pattern_veto_prob": round(decision.get("pre_pattern_veto_prob", decision["adjusted_model_prob"]), 4),
                             "yes_veto_applied": bool(decision.get("yes_veto_applied", False)),
@@ -555,9 +513,9 @@ class SignalGenerator:
                             "base_required_edge": round(decision.get("base_required_edge", decision["required_edge"]), 4),
                             "price_band": decision.get("price_band"),
                             "required_confidence": round(decision.get("required_confidence", 0.0), 4),
-                            "learning_confidence": round(intelligence["learning_confidence"], 4),
-                            "inefficiency_score": round(intelligence["inefficiency_score"], 4),
-                            "segment_adjustment": round(intelligence["segment_adjustment"], 4),
+                            "learning_confidence": 0.0,
+                            "inefficiency_score": 0.0,
+                            "segment_adjustment": 0.0,
                             "learning_features": learning_payload,
                             "market_snapshot": sanity["snapshot"],
                             "timestamp": str(datetime.now())
@@ -838,9 +796,9 @@ class SignalGenerator:
             if low < high:
                 return {"type": "range", "low": low, "high": high}
 
-        # 3. Threshold ladder phrasing (e.g. "72F or higher", "53F or below")
+        # 3. Threshold ladder phrasing (e.g. "72F or higher", "72F or above", "53F or below")
         above_rung_match = re.search(
-            rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c|degrees)?\s+or higher\b',
+            rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c|degrees)?\s+or (?:higher|above)\b',
             q_lower,
         )
         if above_rung_match:
@@ -918,7 +876,7 @@ class SignalGenerator:
         if single_match:
             return (float(single_match.group(1)), 1)
 
-        above_match = re.search(rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c)?\s+or higher', combined)
+        above_match = re.search(rf'(\d+(?:\.\d+)?)\s*{DEGREE_OPTIONAL_PATTERN}(?:f|c)?\s+or (?:higher|above)', combined)
         if above_match:
             return (float(above_match.group(1)), 2)
 
@@ -1153,11 +1111,16 @@ class SignalGenerator:
             temp_dispersion = variance ** 0.5
         else:
             temp_dispersion = 0.0
+        forecast_values = [float(v) for v in forecast_data.values()] if forecast_data else []
+        forecast_min = min(forecast_values) if forecast_values else avg_forecast
+        forecast_max = max(forecast_values) if forecast_values else avg_forecast
 
         exact_rounding_consensus = 0.0
         exact_rounding_protected = False
+        exact_target_distance = abs(avg_forecast - target_val) if target.get("type") == "exact" else None
         if target.get("type") == "exact" and forecast_data:
             target_val = float(target.get("val", avg_forecast))
+            exact_target_distance = abs(avg_forecast - target_val)
             if math.isclose(target_val, round(target_val), abs_tol=1e-9):
                 forecasts = [float(v) for v in forecast_data.values()]
                 rounded_hits = [
@@ -1189,9 +1152,13 @@ class SignalGenerator:
             "settlement_risk": settlement_risk,
             "observation_progress": observation_progress,
             "temp_dispersion": temp_dispersion,
+            "forecast_avg": round(avg_forecast, 4),
+            "forecast_min": round(forecast_min, 4),
+            "forecast_max": round(forecast_max, 4),
             "exact_rounding_consensus": exact_rounding_consensus,
             "exact_rounding_protected": exact_rounding_protected,
-            "calibration_buckets": self.intelligence.state.get("calibration_buckets", {}),
+            "exact_target_distance": round(exact_target_distance, 4) if exact_target_distance is not None else None,
+            "calibration_buckets": {},
         }
 
     def _forecast_freshness_snapshot(self, forecast, market_context, market_date):
@@ -1490,6 +1457,106 @@ class SignalGenerator:
                 "reason": f"U.S. same-day entries wait until 8:00 AM local time ({timezone_name}) for forecast stability.",
             }
         return {"blocked": False, "reason": ""}
+
+    def _is_live_tradeable_location(self, location):
+        if not self.us_only_trading:
+            return True
+        return bool((location or {}).get("is_us"))
+
+    def _build_learning_payload(
+        self,
+        avg_prob,
+        market_price,
+        spread,
+        days_to_resolution,
+        provisional_regime,
+        target,
+        market_context,
+        sanity,
+        entry_timing_gate,
+        decision,
+    ):
+        target_type = str((target or {}).get("type") or "threshold")
+        direction = str((target or {}).get("direction") or "above")
+        source_count = len((market_context or {}).get("forecast_data", {}) or [])
+        if market_price <= 0.12 or market_price >= 0.88:
+            pricing_bucket = "extreme"
+        elif market_price <= 0.22 or market_price >= 0.78:
+            pricing_bucket = "selective"
+        else:
+            pricing_bucket = "preferred"
+
+        return {
+            "features": {
+                "spread": round(spread, 6),
+                "days_urgency": round(1.0 / (days_to_resolution + 1.0), 6),
+                "temp_dispersion": round(float(market_context.get("temp_dispersion", 0.0) or 0.0) / 8.0, 6),
+                "source_count": round(min(source_count / 4.0, 1.0), 6),
+                "target_range": 1.0 if target_type == "range" else 0.0,
+                "target_exact": 1.0 if target_type == "exact" else 0.0,
+                "direction_below": 1.0 if direction == "below" else 0.0,
+            },
+            "meta": {
+                "regime": provisional_regime,
+                "target_type": target_type,
+                "direction": direction,
+                "pricing_bucket": pricing_bucket,
+                "source_count_bucket": str(min(source_count, 4)),
+                "local_peak_stage": market_context["local_peak_stage"],
+                "local_peak_stage_detail": market_context["local_peak_stage_detail"],
+                "timezone": market_context["timezone"],
+                "continent": market_context["continent"],
+                "city": market_context["city"],
+                "country": market_context["country"],
+                "country_code": market_context["country_code"],
+                "utc_offset_hours": market_context["utc_offset_hours"],
+                "local_now": market_context["local_now"],
+                "local_hour": market_context["local_hour"],
+                "local_date": market_context["local_date"],
+                "forecast_revision_direction": market_context["forecast_revision_direction"],
+                "forecast_fetched_at": market_context.get("forecast_fetched_at"),
+                "forecast_bundle_age_minutes": round(market_context.get("forecast_bundle_age_minutes", 0.0), 3),
+                "provider_primary_source": market_context.get("provider_primary_source"),
+                "provider_issued_at": market_context.get("provider_issued_at"),
+                "provider_issue_age_minutes": round(market_context.get("provider_issue_age_minutes", 0.0), 3),
+                "provider_issue_source": market_context.get("provider_issue_source"),
+                "metar_observed_at": market_context.get("metar_observed_at"),
+                "metar_age_hours": round(market_context.get("metar_age_hours", 0.0), 3),
+                "resolution_source": market_context.get("resolution_source"),
+                "resolution_station_name": market_context.get("resolution_station_name"),
+                "resolution_station_url": market_context.get("resolution_station_url"),
+                "resolution_station_id": market_context.get("resolution_station_id"),
+                "resolution_coordinates_applied": bool(market_context.get("resolution_coordinates_applied")),
+                "location_lat": round(float(market_context.get("lat")), 5) if market_context.get("lat") is not None else None,
+                "location_lon": round(float(market_context.get("lon")), 5) if market_context.get("lon") is not None else None,
+                "temperature_unit": "fahrenheit" if market_context.get("country_code") == "US" else "celsius",
+                "entry_timing_blocked": bool(entry_timing_gate["blocked"]),
+                "entry_timing_reason": entry_timing_gate["reason"],
+                "pattern_veto": "yes" if decision.get("yes_veto_applied") else ("no" if decision.get("no_veto_applied") else "none"),
+                "veto_side": "YES" if decision.get("yes_veto_applied") else ("NO" if decision.get("no_veto_applied") else "NONE"),
+                "intelligence_enabled": False,
+            },
+            "base_prob": round(avg_prob, 6),
+            "market_yes_price": round(market_price, 6),
+            "intelligence_prob": round(avg_prob, 6),
+            "decision_prob": round(avg_prob, 6),
+            "decision_delta": 0.0,
+            "model_blend": 0.0,
+            "market_snapshot": sanity.get("snapshot") or {},
+            "decision": {
+                "action": decision["action"],
+                "adjusted_model_prob": round(decision["calibrated_model_prob"], 6),
+                "pre_calibration_model_prob": round(decision["adjusted_model_prob"], 6),
+                "calibrated_model_prob": round(decision["calibrated_model_prob"], 6),
+                "pre_pattern_veto_prob": round(
+                    decision.get("pre_pattern_veto_prob", decision["adjusted_model_prob"]),
+                    6,
+                ),
+                "pattern_veto_applied": bool(decision.get("pattern_veto_applied", False)),
+                "yes_veto_applied": bool(decision.get("yes_veto_applied", False)),
+                "no_veto_applied": bool(decision.get("no_veto_applied", False)),
+            },
+        }
 
     def save_signals(self, signals, diagnostics=None, market_states=None):
         self._write_signal_store(signals, diagnostics=diagnostics, market_states=market_states, log=True)

@@ -141,6 +141,30 @@ class TemperatureAnalysisEntryTests(unittest.TestCase):
         self.assertEqual(payload["forecast_data"]["noaa"], 91.0)
         self.assertEqual(payload["target"]["val"], 90)
 
+    def test_executor_builds_partial_temperature_analysis_entry_without_forecast_data(self):
+        executor = TradeExecutor.__new__(TradeExecutor)
+
+        payload_json = executor._temperature_analysis_entry_json(
+            {
+                "market_id": "m2",
+                "condition_id": "c2",
+                "market_date": "2026-05-22",
+                "city": "Helsinki",
+                "country_code": "FI",
+                "timezone": "Europe/Helsinki",
+                "resolution_station_id": "EFHK",
+                "resolution_station_name": "Helsinki Vantaa Airport Station",
+                "resolution_station_url": "https://www.wunderground.com/history/daily/fi/vantaa/EFHK",
+                "target": {"type": "exact", "val": 17},
+                "timestamp": "2026-05-22 08:01:54",
+            }
+        )
+        payload = json.loads(payload_json)
+
+        self.assertEqual(payload["station_id"], "EFHK")
+        self.assertEqual(payload["forecast_data"], {})
+        self.assertEqual(payload["target"]["val"], 17)
+
 
 class TemperatureAnalysisSettlementTests(unittest.TestCase):
     def test_threshold_and_range_hits_use_market_semantics(self):
@@ -155,8 +179,20 @@ class TemperatureAnalysisSettlementTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
+            monitor._evaluate_target_hit({"type": "threshold", "direction": "below", "val": 65}, 65.9),
+            1,
+        )
+        self.assertEqual(
+            monitor._evaluate_target_hit({"type": "threshold", "direction": "below", "val": 65}, 65.95),
+            0,
+        )
+        self.assertEqual(
             monitor._evaluate_target_hit({"type": "range", "low": 65, "high": 66}, 66.9),
             1,
+        )
+        self.assertEqual(
+            monitor._evaluate_target_hit({"type": "range", "low": 65, "high": 66}, 66.95),
+            0,
         )
         self.assertEqual(
             monitor._evaluate_target_hit({"type": "range", "low": 65, "high": 66}, 67.0),
@@ -239,6 +275,57 @@ class TemperatureAnalysisSettlementTests(unittest.TestCase):
         monitor.record_temperature_analysis("live", trade, 0, "2026-05-23T00:00:00Z")
 
         self.assertEqual(captured[0]["actual_source_status"], "missing_entry_snapshot")
+
+    def test_record_temperature_analysis_reconstructs_snapshot_from_learning_features(self):
+        captured = []
+        monitor = SettlementMonitor.__new__(SettlementMonitor)
+        monitor.db = SimpleNamespace(upsert_temperature_settlement_analysis=lambda record: captured.append(record))
+        monitor.temperature_history = SimpleNamespace(
+            fetch_daily_actual_temperature=lambda entry: {
+                "actual_temperature": 17.0,
+                "actual_temperature_unit": "celsius",
+                "actual_observed_at": "2026-05-22T23:59:59",
+                "actual_source": "wunderground_history",
+                "actual_source_status": "resolved",
+            }
+        )
+
+        trade = SimpleNamespace(
+            id=3,
+            market_id="m3",
+            condition_id="c3",
+            market_date="2026-05-22",
+            entry_model_prob=0.55,
+            entry_market_prob=0.24,
+            entry_confidence=0.99,
+            entry_spread=0.01,
+            entry_regime="near_peak",
+            timestamp="2026-05-22 08:01:54",
+            temperature_analysis_entry=None,
+            learning_features=json.dumps(
+                {
+                    "meta": {
+                        "city": "Helsinki",
+                        "country_code": "FI",
+                        "timezone": "Europe/Helsinki",
+                        "resolution_station_id": "EFHK",
+                        "resolution_station_name": "Helsinki Vantaa Airport Station",
+                        "resolution_station_url": "https://www.wunderground.com/history/daily/fi/vantaa/EFHK",
+                        "location_lat": 60.31722,
+                        "location_lon": 24.96333,
+                        "temperature_unit": "celsius",
+                    }
+                }
+            ),
+        )
+
+        monitor.record_temperature_analysis("paper", trade, 1, "2026-05-23T00:00:00Z")
+        record = captured[0]
+
+        self.assertEqual(record["city"], "Helsinki")
+        self.assertEqual(record["station_id"], "EFHK")
+        self.assertEqual(record["actual_temperature"], 17.0)
+        self.assertEqual(record["actual_source_status"], "resolved")
 
 
 class TemperatureHistorySafetyTests(unittest.TestCase):

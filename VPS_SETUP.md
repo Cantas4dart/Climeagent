@@ -1,162 +1,359 @@
-# Blocky Polymarket VPS Setup Guide
+# Blocky Polymarket VPS Setup
 
-Deploy the bot 24/7 on a Linux VPS such as Ubuntu 22.04 or 24.04.
+This guide prepares Blocky for production-style hosting on a Linux VPS with:
 
-## 1. Recommended Server Specs
+- live trading restricted to U.S. markets only
+- intelligence layer disabled for live signal decisions
+- separate long-running services for brain, bot, executor, and settlement
+- hardened SSH, firewalling, backups, and least-privilege runtime
 
-Current single-box setup:
-- OS: Ubuntu 22.04 LTS or 24.04 LTS
-- CPU: 4 vCPU minimum
-- RAM: 8 GB minimum
-- Disk: 80 GB+ SSD/NVMe
+The app uses outbound connections only for normal operation. You do not need to expose any public web port.
 
-Safer production setup:
-- CPU: 8 vCPU
-- RAM: 16 GB
-- Disk: 200 GB+ NVMe
+## 1. Deployment Shape
 
-Notes:
-- The app runs multiple long-lived processes concurrently: bot, brain, executor, and settlement.
-- SQLite can run on the same VPS without issue at the current stage.
-- For larger scale, especially hundreds to 1,000 users, move from SQLite to PostgreSQL.
+Recommended stack:
 
-## 2. What Runs on the VPS
+- Ubuntu 24.04 LTS
+- 4 vCPU minimum
+- 8 GB RAM minimum
+- 100 GB SSD/NVMe minimum
 
-One VPS can run all of these together:
-- Telegram bot
-- Python signal/brain process
-- Trade executor
-- Settlement monitor
-- Local SQL database
+Preferred production headroom:
 
-This is fine for now. Reliability becomes the bigger concern before raw CPU does.
+- 8 vCPU
+- 16 GB RAM
+- 200 GB NVMe
 
-## 3. Environment Setup
+Processes to run concurrently:
 
-SSH into the VPS and install the core dependencies:
+- `brain/main.py`: signal generation
+- `pyapp.bot`: Telegram bot
+- `pyapp.executor`: order execution and open-trade monitoring
+- `pyapp.settlement`: settlement checks, repair, claims, and feedback export
+
+## 2. Security Baseline
+
+Before deploying the app:
 
 ```bash
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y curl git build-essential python3 python3-pip python3-venv sqlite3
+sudo apt install -y ufw fail2ban unattended-upgrades ca-certificates curl git sqlite3 python3 python3-venv python3-pip
+sudo dpkg-reconfigure --priority=low unattended-upgrades
+```
 
-# Install Node.js 20
+Create a dedicated runtime user:
+
+```bash
+sudo adduser --disabled-password --gecos "" blocky
+sudo usermod -aG sudo blocky
+```
+
+Use SSH keys only:
+
+```bash
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+nano ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+Harden SSH:
+
+```bash
+sudo nano /etc/ssh/sshd_config
+```
+
+Set or confirm:
+
+```text
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+X11Forwarding no
+AllowUsers blocky
+```
+
+Then reload SSH:
+
+```bash
+sudo systemctl reload ssh
+```
+
+Lock down the firewall. Prefer allowlisting only your admin IP:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow from YOUR_ADMIN_IP to any port 22 proto tcp
+sudo ufw enable
+sudo ufw status verbose
+```
+
+If your cloud provider has a network firewall or security group, also restrict SSH there.
+
+## 3. Clone And Install
+
+Switch to the service user:
+
+```bash
+sudo -iu blocky
+```
+
+Clone to a stable location:
+
+```bash
+git clone <your-repo-url> /opt/blocky-polymarket
+cd /opt/blocky-polymarket
+```
+
+Create the virtual environment and install dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip wheel
+pip install -r requirements.txt
+```
+
+Install Node only if you still want the convenience scripts in `package.json`:
+
+```bash
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
-
-# Install PM2
-sudo npm install -g pm2
-```
-
-## 4. Bot Deployment
-
-```bash
-git clone <your-repo-link>
-cd "Blocky Polymarket"
-
 npm install
-pip3 install -r requirements.txt
 ```
 
-## 5. Configuration
+## 4. Environment Configuration
 
-Create your `.env` file:
+Create the environment file:
 
 ```bash
+cp .env.example .env
 nano .env
-```
-
-Add the required secrets such as:
-- `TELEGRAM_BOT_TOKEN`
-- Polymarket API credentials
-- wallet-related environment values you use in production
-
-Then lock it down:
-
-```bash
 chmod 600 .env
 ```
 
-## 6. Running 24/7 with PM2
+Required production values include:
 
-Your current project already starts all services concurrently through `npm start`, so the VPS guide should follow that by default.
+- `TELEGRAM_BOT_TOKEN`
+- `MASTER_ENCRYPTION_KEY`
+- `POLYGON_RPC_URL` or `POLYGON_RPC_URLS`
+- `RELAYER_API_KEY`
+- `RELAYER_API_KEY_ADDRESS`
+- Polymarket wallet/API values used by your production flow
 
-Recommended:
+Set the current live-trading mode explicitly:
 
-```bash
-pm2 start npm --name "blocky" -- start
-pm2 save
-pm2 startup
+```text
+BLOCKY_US_ONLY_TRADING=1
 ```
 
-This uses the existing script in `package.json`, which launches:
-- Python brain
-- Telegram bot
-- trade executor
-- settlement monitor
+Current live behavior after the code changes:
 
-Optional fallback:
+- non-U.S. markets are skipped at signal generation time
+- live decision probability uses the raw ensemble output
+- intelligence-driven live probability adjustments are disabled
 
-If you ever want stricter isolation, you can still run them as separate PM2 processes later, but the default setup here matches your current concurrent runtime.
+## 5. Directory Permissions
 
-## 7. Monitoring and Logs
-
-Useful commands:
+Make sure the runtime user owns the app and writable data:
 
 ```bash
-pm2 status
-pm2 logs
-pm2 restart all
-pm2 stop all
-pm2 monit
+sudo chown -R blocky:blocky /opt/blocky-polymarket
+mkdir -p /opt/blocky-polymarket/data
+chmod 700 /opt/blocky-polymarket/data
 ```
 
-Watch these in particular:
-- signal scan duration
-- API/network failures
-- settlement loop stability
-- disk growth from logs and database files
+## 6. Preflight Checks
 
-## 8. Database Guidance
-
-Short term:
-- SQLite on the same VPS is okay.
-- Back up `data/users.db` regularly.
-
-Before major scale:
-- Move to PostgreSQL.
-- SQLite is file-based and can become a bottleneck with heavier concurrent writes.
-- PostgreSQL is the better choice for reliability, recovery, and multi-process workloads.
-
-Practical rule:
-- Okay now: SQLite on one VPS
-- Before heavy scale: PostgreSQL
-- After growth: separate app workers and database
-
-## 9. Security and Reliability
-
-- Keep only SSH open unless you intentionally expose another service.
-- Use an SSH key, not password login.
-- Enable a firewall such as `ufw`.
-- Set up backups for:
-  - `.env`
-  - `data/users.db`
-  - any future PostgreSQL database
-- Consider PM2 log rotation if logs grow quickly.
-
-Example firewall:
+Run one-shot checks before enabling background services:
 
 ```bash
-sudo ufw allow OpenSSH
-sudo ufw enable
-sudo ufw status
+cd /opt/blocky-polymarket
+source .venv/bin/activate
+python -m pytest tests/test_brain_signal_location.py tests/test_brain_exact_markets.py tests/test_temperature_analysis.py -q
+python -u brain/main.py
 ```
 
-## 10. Recommendation Summary
+Stop the brain after one clean scan if needed with `Ctrl+C`.
 
-If reliability and efficiency come first:
-- Start on Linux, not Windows RDP.
-- Use a VPS, not a desktop-style server.
-- Run all current services on one VPS for now.
-- Use 4 vCPU / 8 GB RAM minimum.
-- Prefer 8 vCPU / 16 GB RAM if you want headroom.
-- Plan to migrate from SQLite to PostgreSQL before serious growth.
+You can also test the Python app components one by one:
+
+```bash
+python -m pyapp.bot --once
+python -m pyapp.executor --once
+python -m pyapp.settlement --once
+```
+
+## 7. Run Concurrent Services With systemd
+
+Copy the provided service units:
+
+```bash
+sudo cp deploy/systemd/blocky-*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+Enable and start them:
+
+```bash
+sudo systemctl enable --now blocky-brain.service
+sudo systemctl enable --now blocky-bot.service
+sudo systemctl enable --now blocky-executor.service
+sudo systemctl enable --now blocky-settlement.service
+```
+
+Check status:
+
+```bash
+sudo systemctl status blocky-brain.service
+sudo systemctl status blocky-bot.service
+sudo systemctl status blocky-executor.service
+sudo systemctl status blocky-settlement.service
+```
+
+Follow logs:
+
+```bash
+journalctl -u blocky-brain.service -f
+journalctl -u blocky-bot.service -f
+journalctl -u blocky-executor.service -f
+journalctl -u blocky-settlement.service -f
+```
+
+Restart after a deploy:
+
+```bash
+sudo systemctl restart blocky-brain.service blocky-bot.service blocky-executor.service blocky-settlement.service
+```
+
+Why `systemd` instead of one bundled launcher:
+
+- each process restarts independently
+- failures are easier to isolate
+- logs are separate
+- service ordering is clearer
+- security controls are stronger than a single shared process tree
+
+## 8. Operational Notes
+
+Brain:
+
+- generates `data/signals.json`
+- now only emits live signals for U.S. markets
+
+Executor:
+
+- reads `data/signals.json`
+- places real or paper trades
+- monitors open trades against fresh market states
+
+Settlement:
+
+- checks closed markets
+- records settlement analysis
+- exports feedback files
+
+Bot:
+
+- handles Telegram onboarding, controls, stats, and wallet flows
+
+## 9. Backups And Recovery
+
+Back up at least:
+
+- `.env`
+- `data/users.db`
+- `data/signals.json`
+- `data/forecast_history.json`
+- `data/intelligence_state.json`
+- `data/learning_feedback.jsonl`
+
+Create a simple backup directory:
+
+```bash
+mkdir -p /opt/blocky-backups
+chmod 700 /opt/blocky-backups
+```
+
+Example daily backup script:
+
+```bash
+cat > /opt/blocky-polymarket/deploy/backup.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+DEST="/opt/blocky-backups/$STAMP"
+mkdir -p "$DEST"
+cp /opt/blocky-polymarket/.env "$DEST/"
+cp /opt/blocky-polymarket/data/users.db "$DEST/"
+cp /opt/blocky-polymarket/data/signals.json "$DEST/" 2>/dev/null || true
+cp /opt/blocky-polymarket/data/forecast_history.json "$DEST/" 2>/dev/null || true
+cp /opt/blocky-polymarket/data/intelligence_state.json "$DEST/" 2>/dev/null || true
+cp /opt/blocky-polymarket/data/learning_feedback.jsonl "$DEST/" 2>/dev/null || true
+find /opt/blocky-backups -maxdepth 1 -mindepth 1 -type d | sort | head -n -14 | xargs -r rm -rf
+EOF
+chmod 700 /opt/blocky-polymarket/deploy/backup.sh
+```
+
+Schedule it:
+
+```bash
+crontab -e
+```
+
+Add:
+
+```text
+15 2 * * * /opt/blocky-polymarket/deploy/backup.sh
+```
+
+Prefer also syncing encrypted backups to off-box storage.
+
+## 10. Deployment Flow For Updates
+
+On the VPS:
+
+```bash
+cd /opt/blocky-polymarket
+git pull
+source .venv/bin/activate
+pip install -r requirements.txt
+npm install
+python -m pytest tests/test_brain_signal_location.py tests/test_brain_exact_markets.py tests/test_temperature_analysis.py -q
+sudo systemctl restart blocky-brain.service blocky-bot.service blocky-executor.service blocky-settlement.service
+```
+
+If Python dependencies did not change, you can skip `pip install`.
+If Node dependencies did not change, you can skip `npm install`.
+
+## 11. Network Exposure Strategy
+
+Because the bot uses Telegram polling and outbound API calls:
+
+- do not expose a public HTTP app port
+- keep inbound access limited to SSH only
+- if you want an extra control panel later, place it behind Tailscale, Cloudflare Access, or an IP allowlist
+
+For your current partial rollout:
+
+- keep the VPS itself private except for SSH
+- keep live trading U.S.-only with `BLOCKY_US_ONLY_TRADING=1`
+- continue validating non-U.S. signal quality offline or in paper mode until ready
+
+## 12. Final Production Checklist
+
+- SSH keys only
+- root login disabled
+- password auth disabled
+- firewall enabled
+- fail2ban enabled
+- unattended upgrades enabled
+- dedicated `blocky` user created
+- `.env` populated and chmod `600`
+- U.S.-only live trading enabled
+- tests passing on the VPS
+- four `systemd` services enabled
+- backups scheduled
+- restore procedure tested at least once

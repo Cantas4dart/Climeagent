@@ -29,8 +29,8 @@ class TradingModel:
     SELECTIVE_CONFIDENCE_SCORE = 0.85
     EXTREME_CONFIDENCE_SCORE = 0.90
     PREFERRED_PRICE_LOW = 0.23
-    PREFERRED_PRICE_HIGH = 0.77
-    SELECTIVE_PRICE_LOW = 0.13
+    PREFERRED_PRICE_HIGH = 0.85
+    SELECTIVE_PRICE_LOW = 0.20
     SELECTIVE_PRICE_HIGH = 0.87
     
     # Dispersion penalty thresholds
@@ -143,6 +143,65 @@ class TradingModel:
             # Linear ramp from 1.0 at 0.02 to 0.55 at 0.10
             return 1.0 - (0.45 * (temp_dispersion - 0.02) / (self.HIGH_DISPERSION_THRESHOLD - 0.02))
 
+    @staticmethod
+    def _round_half_away_from_zero(value):
+        value = float(value)
+        if value >= 0:
+            return math.floor(value + 0.5)
+        return math.ceil(value - 0.5)
+
+    def _is_whole_degree_exact_target(self, target):
+        target = target or {}
+        if str(target.get("type") or "") != "exact":
+            return False
+        target_val = float(target.get("val", 0.0))
+        return math.isclose(target_val, round(target_val), abs_tol=1e-9)
+
+    def _exact_rounding_alignment(self, forecast_temp, target):
+        """
+        Detect whole-degree exact ladders where the forecast already rounds to the
+        exact settlement rung.
+        """
+        if not self._is_whole_degree_exact_target(target):
+            return 0.0
+
+        target_val = float(target.get("val", 0.0))
+        if float(self._round_half_away_from_zero(forecast_temp)) != target_val:
+            return 0.0
+
+        distance = abs(float(forecast_temp) - target_val)
+        return max(0.0, 1.0 - min(distance / 0.75, 1.0))
+
+    def _exact_rounding_consensus_bonus(self, forecast_data, target):
+        """
+        Add a narrow ensemble-level boost when all forecast sources independently
+        round to the same whole-degree exact rung and remain tightly clustered
+        around it.
+        """
+        if not self._is_whole_degree_exact_target(target):
+            return 0.0
+        if not forecast_data:
+            return 0.0
+
+        target_val = float(target.get("val", 0.0))
+        distances = []
+        for temp in forecast_data.values():
+            temp = float(temp)
+            if float(self._round_half_away_from_zero(temp)) != target_val:
+                return 0.0
+            distance = abs(temp - target_val)
+            if distance > 0.5:
+                return 0.0
+            distances.append(distance)
+
+        if not distances:
+            return 0.0
+
+        avg_distance = sum(distances) / len(distances)
+        closeness = max(0.0, 1.0 - min(avg_distance / 0.75, 1.0))
+        consensus = min(len(distances) / 2.0, 1.0)
+        return 0.11 * closeness * consensus
+
     def normal_cdf(self, x, mean, std_dev):
         """Standard normal CDF using the error function."""
         std_dev = max(float(std_dev), 0.25)
@@ -153,14 +212,19 @@ class TradingModel:
             val = float(target["val"])
             direction = target.get("direction", "above")
             if direction == "below":
-                return self.normal_cdf(val, mean, std_dev)
+                # Integer "or below" ladders stop at .9, not the next whole degree.
+                boundary = val + 0.9 if float(val).is_integer() else val
+                return self.normal_cdf(boundary, mean, std_dev)
             return 1 - self.normal_cdf(val, mean, std_dev)
 
         if target["type"] == "range":
             low = float(target["low"])
             high = float(target["high"])
-            # Treat range buckets as inclusive settlement bands around whole numbers.
-            return self.normal_cdf(high + 0.5, mean, std_dev) - self.normal_cdf(low - 0.5, mean, std_dev)
+            if float(low).is_integer() and float(high).is_integer():
+                # Integer range ladders settle on whole-degree buckets:
+                # 86-87 means [86.0, 87.9], not a rounded bucket into 88.
+                return self.normal_cdf(high + 0.9, mean, std_dev) - self.normal_cdf(low, mean, std_dev)
+            return self.normal_cdf(high, mean, std_dev) - self.normal_cdf(low, mean, std_dev)
 
         if target["type"] == "exact":
             val = float(target["val"])
@@ -216,8 +280,16 @@ class TradingModel:
         exact/range markets benefit from integer clustering around report values.
         """
         mean = float(forecast_temp)
-        continuous_prob = self._continuous_probability(mean, target, std_dev)
-        discrete_prob = self._discrete_probability(mean, target, std_dev)
+        exact_rounding_alignment = self._exact_rounding_alignment(mean, target)
+        effective_std_dev = float(std_dev)
+        if exact_rounding_alignment > 0.0:
+            # Whole-degree exact ladders settle on the rounded official report,
+            # so forecasts already rounding to the target should keep more mass
+            # on that rung instead of being diluted like generic decimal exacts.
+            effective_std_dev *= 0.55
+
+        continuous_prob = self._continuous_probability(mean, target, effective_std_dev)
+        discrete_prob = self._discrete_probability(mean, target, effective_std_dev)
 
         distance_to_integer = abs(mean - round(mean))
         discrete_weight = 0.30 if distance_to_integer <= 0.20 else 0.18
@@ -227,6 +299,8 @@ class TradingModel:
             # For exact markets, if the forecast rounds to the exact integer,
             # give integer clustering a bit more influence on the probability.
             discrete_weight += 0.05
+        if exact_rounding_alignment > 0.0:
+            discrete_weight += 0.20 * exact_rounding_alignment
 
         blended = ((1 - discrete_weight) * continuous_prob) + (discrete_weight * discrete_prob)
         return min(max(blended, 0.0), 1.0)
@@ -244,6 +318,8 @@ class TradingModel:
             return 0.0, 1.0, {}
 
         avg_prob = sum(probs) / len(probs)
+        avg_prob += self._exact_rounding_consensus_bonus(forecast_data, target)
+        avg_prob = min(max(avg_prob, 0.0), 1.0)
         spread = 0.0
         stats = {
             "count": len(probs),
@@ -314,6 +390,105 @@ class TradingModel:
         if self.SELECTIVE_PRICE_LOW <= market_price <= self.SELECTIVE_PRICE_HIGH:
             return "selective"
         return "extreme"
+
+    def _should_block_exact_no_near_peak(self, calibrated_prob, market_context):
+        target = (market_context or {}).get("target") or {}
+        if str(target.get("type") or "") != "exact":
+            return False, None
+
+        local_peak_stage = str((market_context or {}).get("local_peak_stage") or "")
+        if local_peak_stage not in {self.REGIME_NEAR_PEAK, self.REGIME_POST_PEAK}:
+            return False, None
+
+        days_to_resolution = max(int((market_context or {}).get("days_to_resolution", 3)), 0)
+        if days_to_resolution > 0:
+            return False, None
+
+        exact_rounding_protected = bool((market_context or {}).get("exact_rounding_protected", False))
+        exact_rounding_consensus = float((market_context or {}).get("exact_rounding_consensus", 0.0) or 0.0)
+        exact_target_distance = abs(float((market_context or {}).get("exact_target_distance", 999.0) or 999.0))
+        temp_dispersion = float((market_context or {}).get("temp_dispersion", 0.0) or 0.0)
+
+        no_prob = 1.0 - float(calibrated_prob)
+        if no_prob < 0.50:
+            return False, None
+
+        if exact_rounding_protected:
+            return True, "Protected exact-rounding consensus keeps this same-day ladder on the YES side"
+
+        if exact_rounding_consensus >= 0.67 and exact_target_distance <= 0.35 and temp_dispersion <= 0.20:
+            return True, (
+                "Exact ladder is too close to the settlement rung during local peak/post-peak "
+                "to justify a NO entry"
+            )
+
+        return False, None
+
+    def _should_block_same_day_temperature_yes_wrong_side(self, calibrated_prob, market_price, market_context):
+        market_context = market_context or {}
+        target = market_context.get("target") or {}
+        target_type = str(target.get("type") or "")
+        if target_type not in {"range", "threshold"}:
+            return False, None
+
+        country_code = str(market_context.get("country_code") or "").upper()
+        if country_code != "US":
+            return False, None
+
+        days_to_resolution = max(int(market_context.get("days_to_resolution", 3)), 0)
+        if days_to_resolution > 0:
+            return False, None
+
+        forecast_avg = market_context.get("forecast_avg")
+        forecast_min = market_context.get("forecast_min")
+        forecast_max = market_context.get("forecast_max")
+        if forecast_avg is None or forecast_min is None or forecast_max is None:
+            return False, None
+
+        forecast_avg = float(forecast_avg)
+        forecast_min = float(forecast_min)
+        forecast_max = float(forecast_max)
+        yes_prob = float(calibrated_prob)
+        if yes_prob <= float(market_price):
+            return False, None
+
+        if target_type == "range":
+            low = target.get("low")
+            high = target.get("high")
+            if low is None or high is None:
+                return False, None
+            low = float(low)
+            high = float(high)
+            range_ceiling = high + 0.9 if float(high).is_integer() else high
+
+            if forecast_max < low and forecast_avg <= (low - 0.30):
+                return True, (
+                    f"All forecasts remain below the {low:.1f} range floor for this same-day US ladder"
+                )
+            if forecast_min > range_ceiling and forecast_avg >= (range_ceiling + 0.30):
+                return True, (
+                    f"All forecasts remain above the {range_ceiling:.1f} range ceiling for this same-day US ladder"
+                )
+            return False, None
+
+        threshold_val = target.get("val")
+        if threshold_val is None:
+            return False, None
+        threshold_val = float(threshold_val)
+        direction = str(target.get("direction") or "above")
+        if direction == "below":
+            threshold_ceiling = threshold_val + 0.9 if float(threshold_val).is_integer() else threshold_val
+            if forecast_min > threshold_ceiling and forecast_avg >= (threshold_ceiling + 0.30):
+                return True, (
+                    f"All forecasts remain above the {threshold_ceiling:.1f} threshold ceiling for this same-day US ladder"
+                )
+            return False, None
+
+        if forecast_max < threshold_val and forecast_avg <= (threshold_val - 0.30):
+            return True, (
+                f"All forecasts remain below the {threshold_val:.1f} threshold floor for this same-day US ladder"
+            )
+        return False, None
 
     def _required_edge(self, model_prob, regime, market_price):
         region = self._probability_region(model_prob)
@@ -514,13 +689,16 @@ class TradingModel:
     def get_edge(self, model_prob, market_price):
         return model_prob - market_price
 
-    def _should_apply_temperature_pattern_veto(self, target):
+    def _should_apply_temperature_pattern_veto(self, target, market_context=None):
         """
         Pattern vetoes are reserved for exact-temperature markets only.
         Threshold and range contracts should follow the forecast direction
         directly instead of being flipped by historical exact-market patterns.
         """
         target = target or {}
+        market_context = market_context or {}
+        if market_context.get("exact_rounding_protected"):
+            return False
         return str(target.get("type") or "") == "exact"
 
     def _temperature_yes_overconfidence_veto(self, adjusted_prob, market_context):
@@ -551,7 +729,7 @@ class TradingModel:
         if not regime:
             return adjusted_prob, None
 
-        if not self._should_apply_temperature_pattern_veto(target) or direction == "below":
+        if not self._should_apply_temperature_pattern_veto(target, market_context) or direction == "below":
             return adjusted_prob, None
 
         matched_pattern = None
@@ -634,7 +812,7 @@ class TradingModel:
         price_band = self._price_band(no_market_price)
         no_prob = 1.0 - adjusted_prob
 
-        if not self._should_apply_temperature_pattern_veto(target) or direction == "below":
+        if not self._should_apply_temperature_pattern_veto(target, market_context) or direction == "below":
             return adjusted_prob, None
 
         matched_pattern = None
@@ -688,7 +866,7 @@ class TradingModel:
         }
         yes_veto_reason = None
         no_veto_reason = None
-        if self._should_apply_temperature_pattern_veto(market_context.get("target")):
+        if self._should_apply_temperature_pattern_veto(market_context.get("target"), market_context):
             if pre_veto_edge > 0:
                 adjusted_prob, yes_veto_reason = self._temperature_yes_overconfidence_veto(adjusted_prob, veto_context)
             else:
@@ -702,14 +880,14 @@ class TradingModel:
         temp_dispersion = float(market_context.get("temp_dispersion", 0.0) or 0.0)
         confidence_score = self._confidence_score(abs_edge, spread, mode, regime, market_price, temp_dispersion)
 
-        # Apply Bayesian calibration adjustment using historical buckets
-        # CRITICAL FIX: Skip calibration if veto was applied - veto overrides empirical calibration
+        # Apply Bayesian calibration adjustment using historical buckets.
+        # Protected exact-rounding consensus means every source is already sitting
+        # on the settlement rung, so historical bucket drag should not flip the side.
         calibration_buckets = market_context.get("calibration_buckets", {})
-        if yes_veto_reason or no_veto_reason:
-            # Veto was applied - preserve the veto's probability adjustment
+        exact_rounding_protected = bool(market_context.get("exact_rounding_protected", False))
+        if yes_veto_reason or no_veto_reason or exact_rounding_protected:
             calibrated_prob = adjusted_prob
         else:
-            # No veto - apply empirical calibration
             calibrated_prob = self.bayesian_calibration_adjustment(adjusted_prob, calibration_buckets)
         
         # Use calibrated probability for final edge calculation
@@ -717,6 +895,28 @@ class TradingModel:
         final_abs_edge = abs(final_edge)
         final_trade_side = "YES" if final_edge > 0 else "NO"
         final_mode = "extreme_mispricing" if final_abs_edge >= self.EXTREME_EDGE_THRESHOLD else "standard"
+
+        exact_no_blocked, exact_no_block_reason = self._should_block_exact_no_near_peak(calibrated_prob, market_context)
+        if exact_no_blocked:
+            calibrated_prob = max(calibrated_prob, min(market_price + 0.02, 0.99))
+            final_edge = self.get_edge(calibrated_prob, market_price)
+            final_abs_edge = abs(final_edge)
+            final_trade_side = "YES" if final_edge > 0 else "NO"
+            final_mode = "extreme_mispricing" if final_abs_edge >= self.EXTREME_EDGE_THRESHOLD else "standard"
+
+        wrong_side_yes_blocked, wrong_side_yes_block_reason = self._should_block_same_day_temperature_yes_wrong_side(
+            calibrated_prob,
+            market_price,
+            market_context,
+        )
+        forced_wrong_side_no_trade = False
+        if wrong_side_yes_blocked:
+            forced_wrong_side_no_trade = True
+            calibrated_prob = min(calibrated_prob, max(market_price - 0.02, 0.01))
+            final_trade_side = "NO"
+            final_edge = (1.0 - calibrated_prob) - (1.0 - market_price)
+            final_abs_edge = abs(final_edge)
+            final_mode = "extreme_mispricing" if final_abs_edge >= self.EXTREME_EDGE_THRESHOLD else "standard"
         
         # Recalculate confidence with final edge if it changed significantly
         if abs(final_abs_edge - abs_edge) > 0.02:
@@ -812,8 +1012,15 @@ class TradingModel:
             reasons.append(
                 f"Observation progress {observation_progress:.2f} is too early for non-preferred pricing"
             )
+        if exact_no_block_reason and final_trade_side == "NO":
+            reasons.append(exact_no_block_reason)
+        if wrong_side_yes_block_reason and final_trade_side == "YES":
+            reasons.append(wrong_side_yes_block_reason)
 
-        should_trade = len(reasons) == 0
+        if forced_wrong_side_no_trade:
+            reasons = []
+
+        should_trade = forced_wrong_side_no_trade or len(reasons) == 0
         reject_categories = self._record_decision_stats(
             should_trade=should_trade,
             reasons=reasons,

@@ -1,0 +1,23 @@
+[Unit]
+Description=Blocky Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blocky
+Group=blocky
+WorkingDirectory=/opt/blocky-polymarket
+EnvironmentFile=/opt/blocky-polymarket/.env
+ExecStart=/opt/blocky-polymarket/.venv/bin/python -m pyapp.bot
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/blocky-polymarket/data
+
+[Install]
+WantedBy=multi-user.target

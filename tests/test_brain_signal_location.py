@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -118,6 +118,37 @@ class MarketClientStationOverrideTests(unittest.TestCase):
 
 
 class SignalTimingGateTests(unittest.TestCase):
+    def test_market_date_must_match_city_local_date(self):
+        generator = SignalGenerator()
+        location = {"timezone": "Europe/London"}
+
+        with patch("brain.signals.datetime") as datetime_mock:
+            datetime_mock.now.return_value = datetime.fromisoformat("2026-05-21T23:30:00+01:00")
+
+            self.assertTrue(
+                generator._is_current_local_market_date(location, date(2026, 5, 21))
+            )
+            self.assertFalse(
+                generator._is_current_local_market_date(location, date(2026, 5, 20))
+            )
+            self.assertFalse(
+                generator._is_current_local_market_date(location, date(2026, 5, 22))
+            )
+
+    def test_market_date_uses_city_rollover_when_city_reaches_next_day(self):
+        generator = SignalGenerator()
+        location = {"timezone": "Asia/Tokyo"}
+
+        with patch("brain.signals.datetime") as datetime_mock:
+            datetime_mock.now.return_value = datetime.fromisoformat("2026-05-22T00:30:00+09:00")
+
+            self.assertTrue(
+                generator._is_current_local_market_date(location, date(2026, 5, 22))
+            )
+            self.assertFalse(
+                generator._is_current_local_market_date(location, date(2026, 5, 21))
+            )
+
     def test_us_same_day_entries_are_blocked_before_8am_local(self):
         generator = SignalGenerator()
 
@@ -159,6 +190,18 @@ class SignalTimingGateTests(unittest.TestCase):
                 date(2026, 5, 17),
             )["blocked"]
         )
+
+    def test_live_trading_defaults_to_us_only(self):
+        generator = SignalGenerator()
+
+        self.assertTrue(generator._is_live_tradeable_location({"is_us": True}))
+        self.assertFalse(generator._is_live_tradeable_location({"is_us": False}))
+
+    def test_live_trading_can_allow_non_us_when_flag_disabled(self):
+        generator = SignalGenerator()
+        generator.us_only_trading = False
+
+        self.assertTrue(generator._is_live_tradeable_location({"is_us": False}))
 
 
 if __name__ == "__main__":
