@@ -194,13 +194,31 @@ class SignalTimingGateTests(unittest.TestCase):
     def test_live_trading_defaults_to_us_only(self):
         generator = SignalGenerator()
 
+        self.assertEqual(generator.live_market_scope, "us")
         self.assertTrue(generator._is_live_tradeable_location({"is_us": True}))
         self.assertFalse(generator._is_live_tradeable_location({"is_us": False}))
 
     def test_live_trading_can_allow_non_us_when_flag_disabled(self):
         generator = SignalGenerator()
+        generator.live_market_scope = "all"
         generator.us_only_trading = False
 
+        self.assertTrue(generator._is_live_tradeable_location({"is_us": False}))
+
+    @patch.dict("os.environ", {"BLOCKY_LIVE_MARKET_SCOPE": "NON_US"}, clear=False)
+    def test_live_trading_can_be_limited_to_non_us(self):
+        generator = SignalGenerator()
+
+        self.assertEqual(generator.live_market_scope, "non_us")
+        self.assertFalse(generator._is_live_tradeable_location({"is_us": True}))
+        self.assertTrue(generator._is_live_tradeable_location({"is_us": False}))
+
+    @patch.dict("os.environ", {"BLOCKY_LIVE_MARKET_SCOPE": "ALL"}, clear=False)
+    def test_live_trading_can_allow_all_markets(self):
+        generator = SignalGenerator()
+
+        self.assertEqual(generator.live_market_scope, "all")
+        self.assertTrue(generator._is_live_tradeable_location({"is_us": True}))
         self.assertTrue(generator._is_live_tradeable_location({"is_us": False}))
 
 

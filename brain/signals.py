@@ -30,7 +30,8 @@ class SignalGenerator:
         self.forecast_history = self._load_forecast_history()
         self.run_count = 0
         self._run_forecast_cache = {}
-        self.us_only_trading = os.getenv("BLOCKY_US_ONLY_TRADING", "1").strip().lower() not in {"0", "false", "no"}
+        self.live_market_scope = self._resolve_live_market_scope()
+        self.us_only_trading = self.live_market_scope == "us"
         self.month_map = {
             "january": 1,
             "february": 2,
@@ -52,6 +53,15 @@ class SignalGenerator:
         except OSError:
             pass
 
+    @staticmethod
+    def _resolve_live_market_scope():
+        raw_scope = (os.getenv("BLOCKY_LIVE_MARKET_SCOPE") or "").strip().lower()
+        if raw_scope:
+            normalized_scope = raw_scope.replace("-", "_").replace(" ", "_")
+            if normalized_scope in {"us", "non_us", "all"}:
+                return normalized_scope
+        return "us" if os.getenv("BLOCKY_US_ONLY_TRADING", "1").strip().lower() not in {"0", "false", "no"} else "all"
+
     def run(self, event_filter=None, max_events=None):
         self.run_count += 1
         start_time = datetime.now()
@@ -61,8 +71,12 @@ class SignalGenerator:
         self.log(f"[SIGNAL]   SCAN #{self.run_count} -- {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         self.log(f"[SIGNAL] {'='*55}")
         self.log("[SIGNAL] Live decision layer: raw ensemble model only.")
-        if self.us_only_trading:
-            self.log("[SIGNAL] Live trading region filter: US-only.")
+        scope_labels = {
+            "us": "US-only",
+            "non_us": "non-US-only",
+            "all": "all markets",
+        }
+        self.log(f"[SIGNAL] Live trading region filter: {scope_labels.get(self.live_market_scope, self.live_market_scope)}.")
 
         # Step 0: Fetch markets
         self.log(f"\n[SIGNAL] --- Phase 1: Market Discovery ---")
@@ -1452,9 +1466,12 @@ class SignalGenerator:
         return {"blocked": False, "reason": ""}
 
     def _is_live_tradeable_location(self, location):
-        if not self.us_only_trading:
+        is_us = bool((location or {}).get("is_us"))
+        if self.live_market_scope == "all":
             return True
-        return bool((location or {}).get("is_us"))
+        if self.live_market_scope == "non_us":
+            return not is_us
+        return is_us
 
     def _build_learning_payload(
         self,
