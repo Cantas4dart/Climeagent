@@ -47,6 +47,7 @@ Los Angeles: Los Angeles International Airport Station: https://www.wunderground
 Madrid: Adolfo Suárez Madrid-Barajas Airport Station: https://www.wunderground.com/history/daily/es/madrid/LEMD
 Tel Aviv: Ben Gurion International Airport Station: https://www.weather.gov/wrh/timeseries?site=LLBG
 Shenzhen: Shenzhen Bao'an International Airport Station: https://www.wunderground.com/history/daily/cn/shenzhen/ZGSZ
+Atlanta: Hartsfield-Jackson Atlanta International Airport Station: https://www.wunderground.com/history/daily/us/ga/atlanta/KATL
 
 ---
 
@@ -103,3 +104,4 @@ Shenzhen: Shenzhen Bao'an International Airport Station: https://www.wundergroun
 | Madrid Barajas | LEMD | 40.49833 | -3.56778 | Good |
 | Tel Aviv (Ben Gurion) | LLBG | 32.00056 | 34.87083 | Good |
 | Shenzhen Bao'an | ZGSZ | 22.63944 | 113.81083 | Good |
+| Atlanta Hartsfield-Jackson | KATL | 33.6367 | -84.4281 | Great |
