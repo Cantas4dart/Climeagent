@@ -191,6 +191,7 @@ class SignalTimingGateTests(unittest.TestCase):
             )["blocked"]
         )
 
+    @patch.dict("os.environ", {}, clear=True)
     def test_live_trading_defaults_to_us_only(self):
         generator = SignalGenerator()
 
@@ -198,6 +199,7 @@ class SignalTimingGateTests(unittest.TestCase):
         self.assertTrue(generator._is_live_tradeable_location({"is_us": True}))
         self.assertFalse(generator._is_live_tradeable_location({"is_us": False}))
 
+    @patch.dict("os.environ", {"BLOCKY_US_ONLY_TRADING": "0"}, clear=False)
     def test_live_trading_can_allow_non_us_when_flag_disabled(self):
         generator = SignalGenerator()
         generator.live_market_scope = "all"
@@ -220,6 +222,20 @@ class SignalTimingGateTests(unittest.TestCase):
         self.assertEqual(generator.live_market_scope, "all")
         self.assertTrue(generator._is_live_tradeable_location({"is_us": True}))
         self.assertTrue(generator._is_live_tradeable_location({"is_us": False}))
+
+    @patch.dict("os.environ", {"CLIME_LIVE_MARKET_SCOPE": "NON_US"}, clear=False)
+    def test_live_trading_accepts_clime_scope_alias(self):
+        generator = SignalGenerator()
+
+        self.assertEqual(generator.live_market_scope, "non_us")
+        self.assertFalse(generator._is_live_tradeable_location({"is_us": True}))
+        self.assertTrue(generator._is_live_tradeable_location({"is_us": False}))
+
+    def test_trade_price_cap_blocks_prices_above_point_eighty_five(self):
+        generator = SignalGenerator()
+
+        self.assertTrue(generator._is_trade_price_within_cap(0.85))
+        self.assertFalse(generator._is_trade_price_within_cap(0.8501))
 
 
 if __name__ == "__main__":

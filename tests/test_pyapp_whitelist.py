@@ -190,6 +190,22 @@ class BotWhitelistTests(unittest.TestCase):
             f"setup:{admin_id}:True:Real Trade selected. Import a wallet, approve pUSD, and fund the trading wallet to continue.",
         )
 
+    def test_help_command_includes_support_contact(self):
+        bot = self.build_bot()
+        recorded = {"messages": []}
+        bot.db = SimpleNamespace(
+            get_user=lambda tg_id: None,
+            is_whitelisted=lambda tg_id: tg_id == "123",
+        )
+        bot.send_message = lambda chat_id, text, reply_markup=None: recorded["messages"].append((chat_id, text, reply_markup))
+
+        bot.handle_command(
+            {"chat": {"id": 1}, "from": {"id": 123}},
+            "/help",
+        )
+
+        self.assertIn("@epsilon_dev1", recorded["messages"][0][1])
+
 
 class SetupKeyboardTests(unittest.TestCase):
     def test_setup_keyboard_keeps_remove_wallet_label_without_wallet(self):

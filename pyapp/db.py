@@ -306,6 +306,13 @@ class DBManager:
             """,
             (str(tg_id),),
         )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO users (tg_id)
+            VALUES (?)
+            """,
+            (str(tg_id),),
+        )
         self.conn.commit()
 
     def ensure_user(self, tg_id: str):

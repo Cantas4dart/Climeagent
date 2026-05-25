@@ -812,7 +812,7 @@ class TelegramPollingBot:
             text = "Paper Trade Reports\n\nSelect a report type:" if user.paper_testing_active else "Real Trade Reports\n\nSelect a report type:"
             return {"text": self.with_dashboard_notice(text, notice), "keyboard": build_report_keyboard()}
         if page == "help":
-            return {"text": self.with_dashboard_notice("Dashboard Help\n\nUse this dashboard as the main control center for positions, claims, balances, and reports.\n\nUse commands for setup, approvals, funding, wallet checks, and risk-setting flows that need manual input.", notice), "keyboard": build_detail_keyboard(auto_claim, has_claimables, "help")}
+            return {"text": self.with_dashboard_notice("Dashboard Help\n\nUse this dashboard as the main control center for positions, claims, balances, reports, and setup.\n\nUse commands for setup, approvals, funding, wallet checks, and risk-setting flows that need manual input.\n\nSupport\nFor any issues, contact @epsilon_dev1.", notice), "keyboard": build_detail_keyboard(auto_claim, has_claimables, "help")}
         return self.render_dashboard_page(user_id, user, "main", notice)
 
     def claim_trade_by_id_for_user(self, user_id: str, user: User, trade_id: int) -> str:
@@ -944,7 +944,7 @@ class TelegramPollingBot:
             self.send_message(chat_id, self.whitelist_denied_message())
             return
         if command == "/help":
-            self.send_message(chat_id, "Clime Help\n\nUse /start as the main dashboard for portfolio, claims, balances, reports, and setup.\n\nSetup\n/import\n/approve\n/check_wallets\n/fund_funder <amt>\n\nTrading Controls\n/start_trading\n/stop_trading\n/set_risk <%>\n/set_max <amt>\n/set_max_open <count>\n\nAccount\n/remove_wallet")
+            self.send_message(chat_id, "Clime Help\n\nUse /start as the main dashboard for portfolio, claims, balances, reports, and setup.\n\nSetup\n/import\n/approve\n/check_wallets\n/fund_funder <amt>\n\nTrading Controls\n/start_trading\n/stop_trading\n/set_risk <%>\n/set_max <amt>\n/set_max_open <count>\n\nAccount\n/remove_wallet\n\nSupport\nFor any issues, contact @epsilon_dev1.")
             return
         if command == "/stats":
             overall = self.db.get_overall_stats(user_id)

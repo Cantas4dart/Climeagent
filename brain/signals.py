@@ -17,6 +17,7 @@ try:
 except ImportError:
     from console import safe_print
 DEGREE_OPTIONAL_PATTERN = f"(?:{chr(176)}\\s*)?"
+MAX_SIGNAL_ENTRY_PRICE = 0.85
 
 
 
@@ -55,12 +56,19 @@ class SignalGenerator:
 
     @staticmethod
     def _resolve_live_market_scope():
-        raw_scope = (os.getenv("BLOCKY_LIVE_MARKET_SCOPE") or "").strip().lower()
+        raw_scope = (os.getenv("CLIME_LIVE_MARKET_SCOPE") or os.getenv("BLOCKY_LIVE_MARKET_SCOPE") or "").strip().lower()
         if raw_scope:
             normalized_scope = raw_scope.replace("-", "_").replace(" ", "_")
             if normalized_scope in {"us", "non_us", "all"}:
                 return normalized_scope
-        return "us" if os.getenv("BLOCKY_US_ONLY_TRADING", "1").strip().lower() not in {"0", "false", "no"} else "all"
+        return "us" if (os.getenv("CLIME_US_ONLY_TRADING") or os.getenv("BLOCKY_US_ONLY_TRADING") or "1").strip().lower() not in {"0", "false", "no"} else "all"
+
+    @staticmethod
+    def _is_trade_price_within_cap(entry_price):
+        try:
+            return float(entry_price) <= MAX_SIGNAL_ENTRY_PRICE
+        except (TypeError, ValueError):
+            return False
 
     def run(self, event_filter=None, max_events=None):
         self.run_count += 1
@@ -450,6 +458,19 @@ class SignalGenerator:
                     if can_trade_now:
                         action = decision["action"]
                         entry_price = sanity["yes_price"] if action == "BUY_YES" else sanity["no_price"]
+                        if not self._is_trade_price_within_cap(entry_price):
+                            market_states[-1]["should_trade"] = False
+                            market_states[-1]["price_cap_blocked"] = True
+                            market_states[-1]["price_cap_reason"] = (
+                                f"Trade-side price {entry_price:.4f} exceeds hard cap {MAX_SIGNAL_ENTRY_PRICE:.2f}"
+                            )
+                            skipped["no_edge"] += 1
+                            self.log(
+                                f"[SIGNAL] | [X] NO TRADE: Trade-side price {entry_price:.4f} exceeds hard cap {MAX_SIGNAL_ENTRY_PRICE:.2f}"
+                            )
+                            self.flush_signals(signals, market_states)
+                            self.log(f"[SIGNAL] +------------------------------------------")
+                            continue
                         self.log(
                             f"[SIGNAL] | >>> TRADE SIGNAL: {action} | Mode: {decision['mode']} | "
                             f"Conf: {decision['confidence_score']:.2f} | Size x{decision['size_multiplier']:.2f} <<<"
