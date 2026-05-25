@@ -115,6 +115,7 @@ class DBManager:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.init()
+        self.backfill_whitelisted_users()
         self.cleanup_legacy_unsigned_submissions()
         self.maybe_migrate_plaintext_secrets()
 
@@ -325,6 +326,16 @@ class DBManager:
         )
         self.conn.commit()
 
+    def backfill_whitelisted_users(self):
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO users (tg_id)
+            SELECT tg_id
+            FROM whitelist
+            """
+        )
+        self.conn.commit()
+
     def is_whitelisted(self, tg_id: str) -> bool:
         row = self.conn.execute(
             "SELECT tg_id FROM whitelist WHERE tg_id = ? LIMIT 1",
@@ -452,30 +463,37 @@ class DBManager:
         return users
 
     def update_trading_status(self, tg_id: str, active: bool):
+        self.ensure_user(tg_id)
         self.conn.execute("UPDATE users SET trading_active = ? WHERE tg_id = ?", (1 if active else 0, tg_id))
         self.conn.commit()
 
     def update_paper_testing_status(self, tg_id: str, active: bool):
+        self.ensure_user(tg_id)
         self.conn.execute("UPDATE users SET paper_testing_active = ? WHERE tg_id = ?", (1 if active else 0, tg_id))
         self.conn.commit()
 
     def update_risk(self, tg_id: str, risk: float):
+        self.ensure_user(tg_id)
         self.conn.execute("UPDATE users SET risk_percent = ? WHERE tg_id = ?", (risk, tg_id))
         self.conn.commit()
 
     def update_max_trade(self, tg_id: str, max_trade: float):
+        self.ensure_user(tg_id)
         self.conn.execute("UPDATE users SET max_trade_amount = ? WHERE tg_id = ?", (max_trade, tg_id))
         self.conn.commit()
 
     def update_auto_claim(self, tg_id: str, auto_claim: bool):
+        self.ensure_user(tg_id)
         self.conn.execute("UPDATE users SET auto_claim = ? WHERE tg_id = ?", (1 if auto_claim else 0, tg_id))
         self.conn.commit()
 
     def update_max_open_positions(self, tg_id: str, max_open_positions: int):
+        self.ensure_user(tg_id)
         self.conn.execute("UPDATE users SET max_open_positions = ? WHERE tg_id = ?", (max_open_positions, tg_id))
         self.conn.commit()
 
     def update_polymarket_account_config(self, tg_id: str, funder_address: str | None, signature_type: int | None):
+        self.ensure_user(tg_id)
         self.conn.execute(
             """
             UPDATE users

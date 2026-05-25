@@ -96,6 +96,92 @@ class BotWhitelistTests(unittest.TestCase):
 
         self.assertEqual(recorded["messages"][0][1], "welcome")
 
+    def test_whitelisted_user_start_trading_command_creates_profile_before_toggle(self):
+        bot = self.build_bot()
+        recorded = {"messages": [], "updates": []}
+        users = {}
+
+        def ensure_user(tg_id):
+            return users.setdefault(
+                tg_id,
+                SimpleNamespace(
+                    tg_id=tg_id,
+                    trading_active=0,
+                    paper_testing_active=0,
+                    auto_claim=1,
+                    private_key="pk",
+                    api_key="api",
+                    api_secret="secret",
+                    api_passphrase="pass",
+                    funder_address=None,
+                    signature_type=None,
+                ),
+            )
+
+        def update_trading_status(tg_id, active):
+            recorded["updates"].append((tg_id, active))
+            ensure_user(tg_id).trading_active = 1 if active else 0
+
+        bot.db = SimpleNamespace(
+            get_user=lambda tg_id: users.get(tg_id),
+            is_whitelisted=lambda tg_id: tg_id == "123",
+            ensure_user=ensure_user,
+            update_trading_status=update_trading_status,
+        )
+        bot.send_message = lambda chat_id, text, reply_markup=None: recorded["messages"].append((chat_id, text, reply_markup))
+
+        bot.handle_command(
+            {"chat": {"id": 1}, "from": {"id": 123}},
+            "/start_trading",
+        )
+
+        self.assertIn("123", users)
+        self.assertEqual(recorded["updates"], [("123", True)])
+        self.assertIn("enabled", recorded["messages"][0][1].lower())
+
+    def test_whitelisted_user_set_risk_command_creates_profile_before_update(self):
+        bot = self.build_bot()
+        recorded = {"messages": [], "updates": []}
+        users = {}
+
+        def ensure_user(tg_id):
+            return users.setdefault(
+                tg_id,
+                SimpleNamespace(
+                    tg_id=tg_id,
+                    trading_active=0,
+                    paper_testing_active=0,
+                    auto_claim=1,
+                    private_key=None,
+                    api_key=None,
+                    api_secret=None,
+                    api_passphrase=None,
+                    funder_address=None,
+                    signature_type=None,
+                ),
+            )
+
+        def update_risk(tg_id, risk):
+            recorded["updates"].append((tg_id, risk))
+            ensure_user(tg_id).risk_percent = risk
+
+        bot.db = SimpleNamespace(
+            get_user=lambda tg_id: users.get(tg_id),
+            is_whitelisted=lambda tg_id: tg_id == "123",
+            ensure_user=ensure_user,
+            update_risk=update_risk,
+        )
+        bot.send_message = lambda chat_id, text, reply_markup=None: recorded["messages"].append((chat_id, text, reply_markup))
+
+        bot.handle_command(
+            {"chat": {"id": 1}, "from": {"id": 123}},
+            "/set_risk 5",
+        )
+
+        self.assertIn("123", users)
+        self.assertEqual(recorded["updates"], [("123", 5.0)])
+        self.assertIn("5.0%", recorded["messages"][0][1])
+
     def test_whitelisted_user_callback_creates_profile_before_rendering(self):
         bot = self.build_bot()
         recorded = {"edited": [], "answered": []}

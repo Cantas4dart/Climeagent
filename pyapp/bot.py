@@ -943,6 +943,8 @@ class TelegramPollingBot:
         if not self.is_authorized_user(user_id):
             self.send_message(chat_id, self.whitelist_denied_message())
             return
+        self.ensure_authorized_user_profile(user_id)
+        user = self.db.get_user(user_id) if user_id else None
         if command == "/help":
             self.send_message(chat_id, "Clime Help\n\nUse /start as the main dashboard for portfolio, claims, balances, reports, and setup.\n\nSetup\n/import\n/approve\n/check_wallets\n/fund_funder <amt>\n\nTrading Controls\n/start_trading\n/stop_trading\n/set_risk <%>\n/set_max <amt>\n/set_max_open <count>\n\nAccount\n/remove_wallet\n\nSupport\nFor any issues, contact @epsilon_dev1.")
             return
