@@ -22,7 +22,7 @@ from .platform_fee import (
     calculate_total_platform_fee,
     is_platform_fee_exempt,
 )
-from .polymarket import PolyMarketAPI
+from .polymarket import PolyMarketAPI, extract_allowance_amount
 from .singleton import acquire_process_lock
 
 load_dotenv()
@@ -48,17 +48,7 @@ def resolve_user_polymarket_account_config(user: User | None) -> dict[str, Any]:
 
 
 def extract_allowance(balance_data: dict[str, Any]) -> float:
-    try:
-        direct = balance_data.get("allowance")
-        if direct is not None:
-            return float(direct)
-    except (TypeError, ValueError):
-        pass
-    standard_ex = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-    try:
-        return float((balance_data.get("allowances") or {}).get(standard_ex))
-    except (TypeError, ValueError):
-        return 0.0
+    return extract_allowance_amount(balance_data)
 
 
 def has_imported_wallet(user: User | None) -> bool:
@@ -599,6 +589,82 @@ class TelegramPollingBot:
             lines.extend(["", *build_paper_stats_lines(paper_stats)])
         return wrap_code_block(lines)
 
+    @staticmethod
+    def _position_size(position: dict[str, Any]) -> float:
+        try:
+            return float(position.get("size") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def sync_live_positions_to_db(
+        self,
+        user_id: str,
+        user: User,
+        poly: PolyMarketAPI | None = None,
+        positions_address: str | None = None,
+    ) -> int:
+        if user.paper_testing_active or not has_imported_wallet(user):
+            return 0
+
+        account_config = resolve_user_polymarket_account_config(user)
+        poly = poly or PolyMarketAPI(
+            {"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""},
+            user.private_key,
+            account_config,
+        )
+        positions_address = positions_address or account_config["funderAddress"] or poly.get_signer_address()
+        positions = poly.get_positions(positions_address) or []
+        imported = 0
+        market_cache: dict[str, dict[str, Any] | None] = {}
+
+        for position in positions:
+            if self._position_size(position) <= 0.01:
+                continue
+
+            raw_outcome = str(position.get("outcome") or "").strip().upper()
+            if raw_outcome not in {"YES", "NO"}:
+                continue
+
+            condition_id = str(position.get("conditionId") or "").strip()
+            if not condition_id:
+                continue
+
+            if condition_id not in market_cache:
+                try:
+                    market_cache[condition_id] = poly.get_market_by_condition_id(condition_id)
+                except Exception as exc:
+                    print(f"[BOT] Could not map condition {condition_id} to a market id during sync: {exc}")
+                    market_cache[condition_id] = None
+
+            market = market_cache[condition_id] or {}
+            market_id = str(market.get("id") or condition_id)
+            if self.db.has_traded(user_id, market_id):
+                continue
+
+            try:
+                avg_price = float(position.get("avgPrice") or position.get("curPrice") or 0.0)
+            except (TypeError, ValueError):
+                avg_price = 0.0
+            if avg_price <= 0:
+                continue
+
+            size = self._position_size(position)
+            imported += self.db.import_external_trade(
+                {
+                    "market_id": market_id,
+                    "market_date": market.get("endDate") or position.get("endDate"),
+                    "condition_id": condition_id,
+                    "tg_id": user_id,
+                    "side": raw_outcome,
+                    "buy_price": avg_price,
+                    "size": size,
+                    "remaining_size": size,
+                    "entry_market_prob": avg_price,
+                }
+            )
+
+        return imported
+
     def build_claimable_message(self, claimable_trades: list[Trade]) -> str:
         if not claimable_trades:
             return wrap_code_block(["Claim Center", "", "No settled winning trades are waiting to be claimed."])
@@ -697,13 +763,17 @@ class TelegramPollingBot:
         account_config = resolve_user_polymarket_account_config(user)
         poly = PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, account_config)
         positions_address = account_config["funderAddress"] or poly.get_signer_address()
+        synced_manual_positions = self.sync_live_positions_to_db(user_id, user, poly, positions_address)
+        if synced_manual_positions > 0:
+            tracked_open_positions = self.db.get_unsettled_trade_count(user_id)
         positions = poly.get_positions(positions_address)
         open_orders = poly.get_open_orders()
+        live_open_positions = len([position for position in positions if self._position_size(position) > 0.01])
         lines = [
             "Live Trading Center",
             "",
             "Overview",
-            format_key_value("Open Positions", tracked_open_positions),
+            format_key_value("Open Positions", max(tracked_open_positions, live_open_positions)),
             format_key_value("Working Orders", len(open_orders or [])),
             format_key_value("Claimable", len(claimable_trades)),
             format_key_value("Auto-Claim", "ON" if user.auto_claim else "OFF"),
@@ -711,6 +781,8 @@ class TelegramPollingBot:
             "Live Wallet",
             format_key_value("Dashboard Wallet", truncate_middle(positions_address, 10, 6)),
         ]
+        if synced_manual_positions > 0:
+            lines.extend(["", f"Synced {synced_manual_positions} manual live position(s) into dashboard tracking."])
         if positions:
             lines.extend(["", "Positions"])
             for position in positions[:6]:
@@ -732,7 +804,7 @@ class TelegramPollingBot:
             for order in open_orders[:6]:
                 lines.append(format_order_summary(order))
         else:
-            lines.extend(["", "No active market orders right now."])
+            lines.extend(["", "No active market orders right now.", "Filled manual buys will not stay here after they match."])
         return {"text": wrap_code_block(lines), "keyboard": build_positions_keyboard(bool(user.auto_claim), False)}
 
     def build_trade_history_page(self, user_id: str, user: User) -> dict[str, Any]:
@@ -758,6 +830,15 @@ class TelegramPollingBot:
         has_claimables = len(claimable_trades) > 0
         if not user:
             return {"text": self.with_dashboard_notice(self.build_welcome_dashboard(), notice or "No wallet profile found yet. Choose Real Trade or Paper Trade to begin."), "keyboard": build_onboarding_keyboard()}
+        if (
+            not user.paper_testing_active
+            and has_imported_wallet(user)
+            and page in {"refresh", "main", "stats", "history", "orders"}
+        ):
+            try:
+                self.sync_live_positions_to_db(user_id, user)
+            except Exception as exc:
+                print(f"[BOT] Live position sync failed for {user_id}: {exc}")
         if page in {"welcome"}:
             return {"text": self.with_dashboard_notice(self.build_welcome_dashboard(), notice), "keyboard": build_onboarding_keyboard()}
         if page in {"refresh", "main"}:

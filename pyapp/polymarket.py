@@ -25,6 +25,13 @@ from .relayer import RelayClient, build_builder_config_from_env
 
 load_dotenv()
 
+POLYMARKET_ALLOWANCE_SPENDERS = [
+    "0xAdA100Db00Ca00073811820692005400218FcE1f",  # CTF Collateral Adapter
+    "0xadA2005600Dec949baf300f4C6120000bDB6eAab",  # NegRisk CTF Collateral Adapter
+    "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",  # Neg Risk Adapter
+    "0xE111180000d2663C0091e4f400237545B87B996B",  # CTF Exchange V2
+]
+
 
 def get_polygon_rpc_candidates() -> list[str]:
     configured = (os.getenv("POLYGON_RPC_URL") or "").strip()
@@ -63,6 +70,26 @@ def _to_plain(value: Any) -> Any:
     if hasattr(value, "__dict__") and not isinstance(value, (str, bytes, int, float, bool, type(None))):
         return {k: _to_plain(v) for k, v in value.__dict__.items()}
     return value
+
+
+def extract_allowance_amount(balance_data: dict[str, Any]) -> float:
+    direct_allowance = balance_data.get("allowance")
+    try:
+        if direct_allowance is not None:
+            return float(direct_allowance)
+    except (TypeError, ValueError):
+        pass
+
+    allowances = balance_data.get("allowances") or {}
+    for spender in POLYMARKET_ALLOWANCE_SPENDERS:
+        try:
+            value = allowances.get(spender)
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+
+    return 0.0
 
 
 class PolyMarketAPI:
@@ -213,12 +240,9 @@ class PolyMarketAPI:
             raise ValueError("Client not initialized")
 
         spenders = [
-            "0xAdA100Db00Ca00073811820692005400218FcE1f",  # CTF Collateral Adapter
-            "0xadA2005600Dec949baf300f4C6120000bDB6eAab",  # NegRisk CTF Collateral Adapter
-            "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",  # Neg Risk Adapter
-            "0xE111180000d2663C0091e4f400237545B87B996B",  # CTF Exchange V2
-            self.collateral_onramp_address,  # Collateral onramp
-            self.collateral_offramp_address,  # Collateral offramp
+            *POLYMARKET_ALLOWANCE_SPENDERS,
+            self.collateral_onramp_address,
+            self.collateral_offramp_address,
         ]
         abi = [
             {
@@ -292,12 +316,9 @@ class PolyMarketAPI:
             abi=abi,
         )
         spenders = [
-            "0xAdA100Db00Ca00073811820692005400218FcE1f",  # CTF Collateral Adapter
-            "0xadA2005600Dec949baf300f4C6120000bDB6eAab",  # NegRisk CTF Collateral Adapter
-            "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",  # Neg Risk Adapter
-            "0xE111180000d2663C0091e4f400237545B87B996B",  # CTF Exchange V2
-            self.collateral_onramp_address,  # Collateral onramp
-            self.collateral_offramp_address,  # Collateral offramp
+            *POLYMARKET_ALLOWANCE_SPENDERS,
+            self.collateral_onramp_address,
+            self.collateral_offramp_address,
         ]
         nonce = web3.eth.get_transaction_count(signer.address)
         gas_price = web3.eth.gas_price

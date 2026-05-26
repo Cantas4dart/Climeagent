@@ -580,6 +580,30 @@ class DBManager:
         self.conn.commit()
         return result.rowcount
 
+    def import_external_trade(self, trade: dict[str, Any]) -> int:
+        result = self.conn.execute(
+            """
+            INSERT OR IGNORE INTO trades (
+              market_id, market_date, condition_id, tg_id, side, buy_price, size, remaining_size,
+              entry_market_prob, execution_status, position_closed
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'external_sync', 0)
+            """,
+            (
+                trade["market_id"],
+                trade.get("market_date"),
+                trade.get("condition_id"),
+                trade["tg_id"],
+                trade["side"],
+                trade.get("buy_price"),
+                trade.get("size"),
+                trade.get("remaining_size"),
+                trade.get("entry_market_prob"),
+            ),
+        )
+        self.conn.commit()
+        return result.rowcount
+
     def mark_trade_submitted(self, tg_id: str, market_id: str, order_id: str | None):
         self.conn.execute(
             """

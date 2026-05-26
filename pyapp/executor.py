@@ -10,23 +10,12 @@ from typing import Any
 import requests
 
 from .db import DBManager, User
-from .polymarket import PolyMarketAPI
+from .polymarket import PolyMarketAPI, extract_allowance_amount
 from .singleton import acquire_process_lock
 
 
 def extract_allowance(balance_data: dict[str, Any]) -> float:
-    direct_allowance = balance_data.get("allowance")
-    try:
-        if direct_allowance is not None:
-            return float(direct_allowance)
-    except (TypeError, ValueError):
-        pass
-
-    standard_ex = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-    try:
-        return float(((balance_data.get("allowances") or {}).get(standard_ex)))
-    except (TypeError, ValueError):
-        return 0.0
+    return extract_allowance_amount(balance_data)
 
 
 def resolve_user_polymarket_account_config(user: User | None) -> dict[str, Any]:

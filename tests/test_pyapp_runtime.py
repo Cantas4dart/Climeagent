@@ -9,7 +9,7 @@ from unittest.mock import patch
 from pyapp.bot import TelegramPollingBot
 from pyapp.executor import TradeExecutor
 from pyapp.main import _spawn, run_selected
-from pyapp.polymarket import PolyMarketAPI
+from pyapp.polymarket import PolyMarketAPI, extract_allowance_amount
 from pyapp.relayer import RelayClient
 from pyapp.settlement import SettlementMonitor
 
@@ -149,6 +149,55 @@ class ExecutorLiveBehaviorTests(unittest.TestCase):
         self.assertIn("Trade order submitted and saved for u1", text)
         self.assertEqual(recorded["submitted"], ("u1", "m1", "ord-1"))
         self.assertEqual(recorded["reserved"]["side"], "YES")
+
+    def test_executor_accepts_v2_allowances_map(self):
+        executor = TradeExecutor.__new__(TradeExecutor)
+        reserved = {"count": 0}
+
+        executor.db = SimpleNamespace(
+            get_unsettled_trade_count=lambda tg_id: 0,
+            has_traded=lambda tg_id, market_id: False,
+            reserve_trade=lambda trade: reserved.__setitem__("count", reserved["count"] + 1) or 1,
+            mark_trade_submitted=lambda tg_id, market_id, order_id: None,
+            release_trade_reservation=lambda tg_id, market_id: None,
+        )
+        executor.reserved_capital_by_user = {}
+        executor.send_trade_alert = lambda *args, **kwargs: None
+
+        poly = SimpleNamespace(
+            get_balance=lambda: {
+                "balance": "100000000",
+                "allowances": {"0xE111180000d2663C0091e4f400237545B87B996B": "100000000"},
+            },
+            get_market_by_id=lambda market_id: {"clobTokenIds": "[\"yes-token\", \"no-token\"]"},
+            place_limit_order=lambda token_id, side, price, size: {"orderID": "ord-2", "status": "live"},
+        )
+        executor.build_poly_client = lambda user, account_config: poly
+
+        user = SimpleNamespace(
+            tg_id="u1",
+            max_open_positions=3,
+            risk_percent=10,
+            max_trade_amount=50,
+        )
+        signals = [
+            {
+                "market_id": "m1",
+                "question": "Will it rain?",
+                "action": "BUY_YES",
+                "mode": "standard",
+                "confidence_score": 0.77,
+                "market_price": 0.5,
+                "entry_price": 0.5,
+                "market_price_yes": 0.5,
+                "market_price_no": 0.5,
+                "condition_id": "cond-1",
+            }
+        ]
+
+        executor.process_real_user_signals(user, signals)
+
+        self.assertEqual(reserved["count"], 1)
 
 
 class SettlementLiveBehaviorTests(unittest.TestCase):
@@ -314,6 +363,59 @@ class RelayClientHeaderTests(unittest.TestCase):
         self.assertEqual(headers["RELAYER_API_KEY"], "rk")
         self.assertEqual(headers["RELAYER_API_KEY_ADDRESS"], "0x0000000000000000000000000000000000000009")
         self.assertEqual(headers["Content-Type"], "application/json")
+
+
+class BalanceAllowanceParsingTests(unittest.TestCase):
+    def test_extract_allowance_amount_reads_v2_exchange_allowance(self):
+        amount = extract_allowance_amount(
+            {
+                "allowances": {
+                    "0xE111180000d2663C0091e4f400237545B87B996B": "2500000",
+                }
+            }
+        )
+
+        self.assertEqual(amount, 2500000.0)
+
+
+class DashboardSyncTests(unittest.TestCase):
+    def test_sync_live_positions_imports_manual_position_into_trade_tracking(self):
+        bot = TelegramPollingBot.__new__(TelegramPollingBot)
+        imported = []
+        tracked = set()
+        bot.db = SimpleNamespace(
+            has_traded=lambda tg_id, market_id: market_id in tracked,
+            import_external_trade=lambda trade: imported.append(trade) or tracked.add(trade["market_id"]) or 1,
+        )
+
+        user = SimpleNamespace(
+            paper_testing_active=0,
+            private_key="0x" + "11" * 32,
+            api_key="k",
+            api_secret="s",
+            api_passphrase="p",
+            funder_address="0x0000000000000000000000000000000000000008",
+            signature_type=2,
+        )
+        poly = SimpleNamespace(
+            get_positions=lambda address: [
+                {
+                    "conditionId": "cond-1",
+                    "size": 4,
+                    "avgPrice": 0.41,
+                    "outcome": "Yes",
+                    "endDate": "2026-06-01T00:00:00Z",
+                }
+            ],
+            get_market_by_condition_id=lambda condition_id: {"id": "market-1", "endDate": "2026-06-01T00:00:00Z"},
+            get_signer_address=lambda: "0x0000000000000000000000000000000000000009",
+        )
+
+        count = bot.sync_live_positions_to_db("u1", user, poly, "0x0000000000000000000000000000000000000008")
+
+        self.assertEqual(count, 1)
+        self.assertEqual(imported[0]["market_id"], "market-1")
+        self.assertEqual(imported[0]["side"], "YES")
 
 
 if __name__ == "__main__":
