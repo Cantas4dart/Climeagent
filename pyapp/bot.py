@@ -75,6 +75,23 @@ def format_key_value(label: str, value: Any, width: int = 17) -> str:
     return f"{label.ljust(width)} {value}"
 
 
+def signature_type_label(signature_type: int | None) -> str:
+    labels = {
+        0: "0 EOA",
+        1: "1 POLY_PROXY",
+        2: "2 GNOSIS_SAFE",
+    }
+    return labels.get(signature_type, "default(EOA)" if signature_type is None else f"{signature_type} unknown")
+
+
+def relayer_mode_for_signature_type(signature_type: int | None) -> str:
+    if signature_type == 1:
+        return "PROXY"
+    if signature_type == 2:
+        return "SAFE"
+    return "none"
+
+
 def wrap_code_block(lines: list[str]) -> str:
     return "\n".join(lines)
 
@@ -507,7 +524,7 @@ class TelegramPollingBot:
                 "",
                 "Wallet",
                 format_key_value("Funder", account_config["funderAddress"] or "wallet address"),
-                format_key_value("Signature Type", account_config["signatureType"] if account_config["signatureType"] is not None else "default(EOA)"),
+                format_key_value("Signature Type", signature_type_label(account_config["signatureType"])),
                 "",
                 "Ready Actions",
                 format_key_value("Import", "replace wallet credentials"),
@@ -569,7 +586,7 @@ class TelegramPollingBot:
                 format_key_value("Max Open Positions", user.max_open_positions),
                 "",
                 "Account",
-                format_key_value("Signature Type", account_config["signatureType"] if account_config["signatureType"] is not None else "default(EOA)"),
+                format_key_value("Signature Type", signature_type_label(account_config["signatureType"])),
                 format_key_value("Funder", account_config["funderAddress"] or "wallet address"),
             ]
         )
@@ -698,7 +715,7 @@ class TelegramPollingBot:
                 "",
                 format_key_value("Trading Balance", f"{balance_num / 1_000_000:.2f} pUSD"),
                 format_key_value("Trading Allowance", f"{allowance_num / 1_000_000:.2f} pUSD"),
-                format_key_value("Signature Type", account_config["signatureType"] if account_config["signatureType"] is not None else "default(EOA)"),
+                format_key_value("Signature Type", signature_type_label(account_config["signatureType"])),
                 format_key_value("Signer", signer_address),
                 format_key_value("Signer Wallet pUSD", f"{signer_wallet_pusd / 1_000_000:.2f} pUSD"),
                 format_key_value("Funder", funder_address),
@@ -722,13 +739,77 @@ class TelegramPollingBot:
                 format_key_value("Signer", signer_address),
                 format_key_value("Configured Funder", funder_address),
                 format_key_value("Profile Proxy", proxy_wallet or "not found"),
-                format_key_value("Signature Type", account_config["signatureType"] if account_config["signatureType"] is not None else "default(EOA)"),
+                format_key_value("Signature Type", signature_type_label(account_config["signatureType"])),
                 "",
                 "Funder matches Polymarket profile proxy wallet."
                 if proxy_wallet and str(proxy_wallet).lower() == funder_address.lower()
                 else "Funder does not match the Polymarket profile proxy wallet, or no profile was found.",
             ]
         )
+
+    def build_diagnostics_message(self, user_id: str, user: User | None) -> str:
+        if not user:
+            return wrap_code_block(["Diagnostics", "", "No user profile found. Use /start first."])
+
+        account_config = resolve_user_polymarket_account_config(user)
+        signature_type = account_config["signatureType"]
+        lines = [
+            "Diagnostics",
+            "",
+            "Stored Profile",
+            format_key_value("Telegram ID", user_id),
+            format_key_value("Wallet Imported", "YES" if has_imported_wallet(user) else "NO"),
+            format_key_value("Trading", "Active" if user.trading_active else "Stopped"),
+            format_key_value("Paper Testing", "ON" if user.paper_testing_active else "OFF"),
+            "",
+            "Polymarket Mode",
+            format_key_value("Signature Type", signature_type_label(signature_type)),
+            format_key_value("Relayer Mode", relayer_mode_for_signature_type(signature_type)),
+            format_key_value("Funder", account_config["funderAddress"] or "signer wallet"),
+        ]
+
+        if not has_imported_wallet(user):
+            lines.extend(["", "No live wallet is attached. Import one before live diagnostics can read signer/profile data."])
+            return wrap_code_block(lines)
+
+        try:
+            poly = PolyMarketAPI(
+                {"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""},
+                user.private_key,
+                account_config,
+            )
+            signer_address = poly.get_signer_address()
+            funder_address = poly.get_configured_funder_address()
+            lines.extend(
+                [
+                    "",
+                    "Resolved Wallets",
+                    format_key_value("Signer", signer_address),
+                    format_key_value("Funder", funder_address),
+                ]
+            )
+            try:
+                profile = poly.get_public_profile_by_wallet(funder_address)
+                proxy_wallet = profile.get("proxyWallet") if isinstance(profile, dict) else None
+                lines.append(format_key_value("Profile Proxy", proxy_wallet or "not found"))
+            except Exception as exc:
+                lines.append(format_key_value("Profile Proxy", f"lookup failed: {str(exc)[:40]}"))
+            try:
+                balance_data = poly.get_balance()
+                lines.extend(
+                    [
+                        "",
+                        "CLOB Account",
+                        format_key_value("Balance", f"{float(balance_data.get('balance', 0)) / 1_000_000:.2f} pUSD"),
+                        format_key_value("Allowance", f"{extract_allowance(balance_data) / 1_000_000:.2f} pUSD"),
+                    ]
+                )
+            except Exception as exc:
+                lines.extend(["", "CLOB Account", format_key_value("Status", f"failed: {str(exc)[:55]}")])
+        except Exception as exc:
+            lines.extend(["", "Live Wallet", format_key_value("Status", f"failed: {str(exc)[:55]}")])
+
+        return wrap_code_block(lines)
 
     def build_positions_dashboard(self, user_id: str, user: User) -> dict[str, Any]:
         tracked_open_positions = self.db.get_unsettled_trade_count(user_id)
@@ -1027,7 +1108,10 @@ class TelegramPollingBot:
         self.ensure_authorized_user_profile(user_id)
         user = self.db.get_user(user_id) if user_id else None
         if command == "/help":
-            self.send_message(chat_id, "Clime Help\n\nUse /start as the main dashboard for portfolio, claims, balances, reports, and setup.\n\nSetup\n/import\n/approve\n/check_wallets\n/fund_funder <amt>\n\nTrading Controls\n/start_trading\n/stop_trading\n/set_risk <%>\n/set_max <amt>\n/set_max_open <count>\n\nAccount\n/remove_wallet\n\nSupport\nFor any issues, contact @epsilon_dev1.")
+            self.send_message(chat_id, "Clime Help\n\nUse /start as the main dashboard for portfolio, claims, balances, reports, and setup.\n\nSetup\n/import\n/approve\n/check_wallets\n/diag\n/fund_funder <amt>\n\nTrading Controls\n/start_trading\n/stop_trading\n/set_risk <%>\n/set_max <amt>\n/set_max_open <count>\n\nAccount\n/remove_wallet\n\nSupport\nFor any issues, contact @epsilon_dev1.")
+            return
+        if command == "/diag":
+            self.send_message(chat_id, self.build_diagnostics_message(user_id, user))
             return
         if command == "/stats":
             overall = self.db.get_overall_stats(user_id)
@@ -1549,7 +1633,18 @@ class TelegramPollingBot:
                 view = self.render_dashboard_page(user_id, saved_user, "setup", "Wallet import completed.")
                 self.send_message(chat_id, view["text"], view["keyboard"])
             except Exception as exc:
-                self.send_message(chat_id, "Wallet import is temporarily unavailable because MASTER_ENCRYPTION_KEY is not configured on the server." if "MASTER_ENCRYPTION_KEY" in str(exc) else "Wallet import failed. Please verify the private key and try again.")
+                error_text = str(exc) or exc.__class__.__name__
+                print(f"[BOT] Wallet import failed for {user_id}: {error_text}")
+                if "MASTER_ENCRYPTION_KEY" in error_text:
+                    self.send_message(chat_id, "Wallet import is temporarily unavailable because MASTER_ENCRYPTION_KEY is not configured on the server.")
+                else:
+                    self.send_message(
+                        chat_id,
+                        "Wallet import failed while deriving Polymarket API keys.\n\n"
+                        f"Selected mode: {signature_type_label(int(text))}\n"
+                        f"Error: {error_text[:350]}\n\n"
+                        "Your previous saved wallet was not removed. Use /diag to see what is currently active.",
+                    )
             finally:
                 session.update({"step": "", "pending_private_key": "", "pending_funder_address": ""})
             return

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pyapp.bot import TelegramPollingBot
+from pyapp.bot import TelegramPollingBot, relayer_mode_for_signature_type, signature_type_label
 from pyapp.executor import TradeExecutor
 from pyapp.main import _spawn, run_selected
 from pyapp.polymarket import PolyMarketAPI, extract_allowance_amount
@@ -95,6 +95,34 @@ class BotOffsetPersistenceTests(unittest.TestCase):
             self.assertEqual(prod_file.read_text(), "27")
             self.assertFalse(test_file.exists())
             self.assertEqual(other_bot._load_offset(), 0)
+
+
+class BotDiagnosticsTests(unittest.TestCase):
+    def test_signature_type_labels_include_safe_mode(self):
+        self.assertEqual(signature_type_label(1), "1 POLY_PROXY")
+        self.assertEqual(signature_type_label(2), "2 GNOSIS_SAFE")
+        self.assertEqual(relayer_mode_for_signature_type(2), "SAFE")
+
+    def test_diag_reports_stored_mode_without_live_wallet(self):
+        bot = TelegramPollingBot.__new__(TelegramPollingBot)
+        user = SimpleNamespace(
+            tg_id="u1",
+            private_key=None,
+            api_key=None,
+            api_secret=None,
+            api_passphrase=None,
+            funder_address="0x0000000000000000000000000000000000000008",
+            signature_type=2,
+            trading_active=1,
+            paper_testing_active=0,
+        )
+
+        text = bot.build_diagnostics_message("u1", user)
+
+        self.assertIn("2 GNOSIS_SAFE", text)
+        self.assertIn("SAFE", text)
+        self.assertIn("Wallet Imported", text)
+        self.assertIn("NO", text)
 
 
 class ExecutorLiveBehaviorTests(unittest.TestCase):
