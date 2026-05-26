@@ -70,6 +70,10 @@ class SignalGenerator:
         except (TypeError, ValueError):
             return False
 
+    @classmethod
+    def _are_market_prices_within_cap(cls, yes_price, no_price):
+        return cls._is_trade_price_within_cap(yes_price) and cls._is_trade_price_within_cap(no_price)
+
     def run(self, event_filter=None, max_events=None):
         self.run_count += 1
         start_time = datetime.now()
@@ -458,15 +462,18 @@ class SignalGenerator:
                     if can_trade_now:
                         action = decision["action"]
                         entry_price = sanity["yes_price"] if action == "BUY_YES" else sanity["no_price"]
-                        if not self._is_trade_price_within_cap(entry_price):
+                        if not self._are_market_prices_within_cap(sanity["yes_price"], sanity["no_price"]):
                             market_states[-1]["should_trade"] = False
                             market_states[-1]["price_cap_blocked"] = True
                             market_states[-1]["price_cap_reason"] = (
-                                f"Trade-side price {entry_price:.4f} exceeds hard cap {MAX_SIGNAL_ENTRY_PRICE:.2f}"
+                                f"YES/NO price ladder {sanity['yes_price']:.4f}/{sanity['no_price']:.4f} "
+                                f"exceeds hard cap {MAX_SIGNAL_ENTRY_PRICE:.2f}"
                             )
                             skipped["no_edge"] += 1
                             self.log(
-                                f"[SIGNAL] | [X] NO TRADE: Trade-side price {entry_price:.4f} exceeds hard cap {MAX_SIGNAL_ENTRY_PRICE:.2f}"
+                                f"[SIGNAL] | [X] NO TRADE: YES/NO price ladder "
+                                f"{sanity['yes_price']:.4f}/{sanity['no_price']:.4f} exceeds hard cap "
+                                f"{MAX_SIGNAL_ENTRY_PRICE:.2f}"
                             )
                             self.flush_signals(signals, market_states)
                             self.log(f"[SIGNAL] +------------------------------------------")

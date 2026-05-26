@@ -236,6 +236,10 @@ class SignalTimingGateTests(unittest.TestCase):
 
         self.assertTrue(generator._is_trade_price_within_cap(0.85))
         self.assertFalse(generator._is_trade_price_within_cap(0.8501))
+        self.assertTrue(generator._are_market_prices_within_cap(0.85, 0.15))
+        self.assertTrue(generator._are_market_prices_within_cap(0.15, 0.85))
+        self.assertFalse(generator._are_market_prices_within_cap(0.8501, 0.1499))
+        self.assertFalse(generator._are_market_prices_within_cap(0.1499, 0.8501))
 
 
 if __name__ == "__main__":
