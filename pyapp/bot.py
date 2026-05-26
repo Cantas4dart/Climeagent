@@ -11,6 +11,7 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
+from requests.exceptions import RequestException
 
 from .crypto import CryptoManager
 from .db import DBManager, DateRangeTradeStats, DatedTradeStats, Trade, TradeStats, User
@@ -393,12 +394,23 @@ class TelegramPollingBot:
         return self.sessions.setdefault(user_id, {"step": "", "pending_private_key": "", "pending_funder_address": ""})
 
     def api_call(self, method: str, payload: dict[str, Any] | None = None):
-        response = requests.post(f"{self.api_base}/{method}", json=payload or {}, timeout=30)
-        response.raise_for_status()
-        body = response.json()
-        if not body.get("ok"):
-            raise RuntimeError(body)
-        return body.get("result")
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                response = requests.post(f"{self.api_base}/{method}", json=payload or {}, timeout=30)
+                response.raise_for_status()
+                body = response.json()
+                if not body.get("ok"):
+                    raise RuntimeError(body)
+                return body.get("result")
+            except RequestException as exc:
+                last_error = exc
+                if attempt == 3:
+                    break
+                time.sleep(attempt)
+        if last_error:
+            raise last_error
+        raise RuntimeError("Telegram API call failed without a captured exception.")
 
     def send_message(self, chat_id: int, text: str, reply_markup: dict[str, Any] | None = None):
         payload: dict[str, Any] = {
@@ -437,12 +449,23 @@ class TelegramPollingBot:
         return self.api_call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
     def poll(self):
-        result = requests.get(f"{self.api_base}/getUpdates", params={"timeout": 25, "offset": self.offset}, timeout=35)
-        result.raise_for_status()
-        body = result.json()
-        if not body.get("ok"):
-            raise RuntimeError(body)
-        return body.get("result", [])
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                result = requests.get(f"{self.api_base}/getUpdates", params={"timeout": 25, "offset": self.offset}, timeout=35)
+                result.raise_for_status()
+                body = result.json()
+                if not body.get("ok"):
+                    raise RuntimeError(body)
+                return body.get("result", [])
+            except RequestException as exc:
+                last_error = exc
+                if attempt == 3:
+                    break
+                time.sleep(attempt)
+        if last_error:
+            raise last_error
+        raise RuntimeError("Telegram poll failed without a captured exception.")
 
     def run(self):
         print("--------------------------")

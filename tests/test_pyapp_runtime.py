@@ -10,6 +10,7 @@ from pyapp.bot import TelegramPollingBot, relayer_mode_for_signature_type, signa
 from pyapp.executor import TradeExecutor
 from pyapp.main import _spawn, run_selected
 from pyapp.polymarket import PolyMarketAPI, extract_allowance_amount
+import pyapp.polymarket as polymarket_module
 from pyapp.relayer import RelayClient
 from pyapp.settlement import SettlementMonitor
 
@@ -353,6 +354,58 @@ class ProxyApprovalMigrationTests(unittest.TestCase):
 
         self.assertEqual(hashes, ["0xtx", "0xtx", "0xtx", "0xtx", "0xtx", "0xtx"])
         self.assertEqual(mock_relay_client_cls.call_args.kwargs["relay_tx_type"], "PROXY")
+
+
+class ClobV2CompatibilityTests(unittest.TestCase):
+    def test_v2_limit_orders_use_gtc_submission(self):
+        poly = PolyMarketAPI.__new__(PolyMarketAPI)
+        poly.client = SimpleNamespace(
+            get_order_book=lambda token_id: SimpleNamespace(tick_size="0.01", neg_risk=False),
+            create_and_post_order=lambda order, options, order_type: {
+                "success": True,
+                "orderID": "ord-v2",
+                "status": str(order_type),
+            },
+        )
+        original_flag = polymarket_module.V2_CLOB_CLIENT
+        original_side = polymarket_module.Side
+        original_order_type = polymarket_module.OrderType
+        try:
+            polymarket_module.V2_CLOB_CLIENT = True
+            polymarket_module.Side = SimpleNamespace(BUY="BUY", SELL="SELL")
+            polymarket_module.OrderType = SimpleNamespace(GTC="GTC", FAK="FAK")
+            result = poly.place_limit_order("token-1", "BUY", 0.3, 4)
+        finally:
+            polymarket_module.V2_CLOB_CLIENT = original_flag
+            polymarket_module.Side = original_side
+            polymarket_module.OrderType = original_order_type
+
+        self.assertEqual(result["orderID"], "ord-v2")
+
+    def test_v2_market_orders_use_one_step_post(self):
+        poly = PolyMarketAPI.__new__(PolyMarketAPI)
+        poly.client = SimpleNamespace(
+            get_order_book=lambda token_id: SimpleNamespace(tick_size="0.01", neg_risk=False),
+            create_and_post_market_order=lambda order, options, order_type: {
+                "success": True,
+                "orderID": "mkt-v2",
+                "status": str(order_type),
+            },
+        )
+        original_flag = polymarket_module.V2_CLOB_CLIENT
+        original_side = polymarket_module.Side
+        original_order_type = polymarket_module.OrderType
+        try:
+            polymarket_module.V2_CLOB_CLIENT = True
+            polymarket_module.Side = SimpleNamespace(BUY="BUY", SELL="SELL")
+            polymarket_module.OrderType = SimpleNamespace(GTC="GTC", FAK="FAK")
+            result = poly.place_market_order("token-1", "SELL", 2)
+        finally:
+            polymarket_module.V2_CLOB_CLIENT = original_flag
+            polymarket_module.Side = original_side
+            polymarket_module.OrderType = original_order_type
+
+        self.assertEqual(result["orderID"], "mkt-v2")
 
 
 class RelayClientHeaderTests(unittest.TestCase):

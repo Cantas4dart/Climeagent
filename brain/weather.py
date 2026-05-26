@@ -1,6 +1,7 @@
 import requests
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from requests.exceptions import RequestException
 
 from dotenv import load_dotenv
 
@@ -27,21 +28,31 @@ class WeatherClient:
         merged_headers = dict(self.user_agent)
         if headers:
             merged_headers.update(headers)
-        response = requests.get(url, params=params, headers=merged_headers, timeout=timeout)
-        response.raise_for_status()
-
-        server_date = None
-        raw_date = response.headers.get("Date")
-        if raw_date:
+        last_error = None
+        for attempt in range(1, 4):
             try:
-                server_date = parsedate_to_datetime(raw_date).isoformat()
-            except (TypeError, ValueError, IndexError):
-                server_date = None
+                response = requests.get(url, params=params, headers=merged_headers, timeout=timeout)
+                response.raise_for_status()
 
-        return response.json(), {
-            "response_received_at": self._utc_now_iso(),
-            "server_date": server_date,
-        }
+                server_date = None
+                raw_date = response.headers.get("Date")
+                if raw_date:
+                    try:
+                        server_date = parsedate_to_datetime(raw_date).isoformat()
+                    except (TypeError, ValueError, IndexError):
+                        server_date = None
+
+                return response.json(), {
+                    "response_received_at": self._utc_now_iso(),
+                    "server_date": server_date,
+                }
+            except RequestException as exc:
+                last_error = exc
+                if attempt == 3:
+                    break
+        if last_error:
+            raise last_error
+        raise RuntimeError("Weather request failed without a captured exception.")
 
     def _request_json(self, url, params=None, headers=None, timeout=20):
         payload, _ = self._request_json_with_meta(url, params=params, headers=headers, timeout=timeout)

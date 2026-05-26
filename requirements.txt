@@ -1,6 +1,6 @@
 requests
 pandas
-py-clob-client
+py-clob-client-v2
 python-dotenv
 web3
 cryptography

@@ -9,19 +9,37 @@ import requests
 from dotenv import load_dotenv
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import (
-    AssetType,
-    ApiCreds,
-    BalanceAllowanceParams,
-    MarketOrderArgs,
-    OrderArgs,
-    OrderType,
-    PartialCreateOrderOptions,
-)
 from web3 import HTTPProvider, Web3
 
 from .relayer import RelayClient, build_builder_config_from_env
+
+try:
+    from py_clob_client_v2 import (
+        ApiCreds,
+        ClobClient,
+        MarketOrderArgs,
+        OrderArgs,
+        OrderType,
+        PartialCreateOrderOptions,
+        Side,
+    )
+    from py_clob_client_v2.order_builder.constants import COLLATERAL as COLLATERAL_ASSET_TYPE
+    BalanceAllowanceParams = None
+    V2_CLOB_CLIENT = True
+except ImportError:
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import (
+        AssetType,
+        ApiCreds,
+        BalanceAllowanceParams,
+        MarketOrderArgs,
+        OrderArgs,
+        OrderType,
+        PartialCreateOrderOptions,
+    )
+    Side = None
+    COLLATERAL_ASSET_TYPE = AssetType.COLLATERAL
+    V2_CLOB_CLIENT = False
 
 load_dotenv()
 
@@ -133,6 +151,13 @@ class PolyMarketAPI:
             funder=self.funder_address,
         )
 
+    @staticmethod
+    def _resolve_side(side: str):
+        normalized = str(side or "").upper()
+        if Side is None:
+            return normalized
+        return getattr(Side, normalized)
+
     def _get_signer_account(self):
         if not self.private_key:
             raise ValueError("Private Key not found")
@@ -222,9 +247,11 @@ class PolyMarketAPI:
         if not self.client:
             raise ValueError("Client not initialized")
         last_error = None
-        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         for attempt in range(1, retries + 1):
             try:
+                if V2_CLOB_CLIENT:
+                    return _to_plain(self.client.get_balance_allowance(COLLATERAL_ASSET_TYPE))
+                params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
                 self.client.update_balance_allowance(params)
                 return _to_plain(self.client.get_balance_allowance(params))
             except Exception as exc:
@@ -423,9 +450,13 @@ class PolyMarketAPI:
             if neg_risk is None:
                 neg_risk = self.client.get_neg_risk(token_id)
 
-            order = OrderArgs(token_id=token_id, price=price, size=float(size), side=side)
+            order = OrderArgs(token_id=token_id, price=price, size=float(size), side=self._resolve_side(side))
             options = PartialCreateOrderOptions(tick_size=tick, neg_risk=neg_risk)
-            response = self.client.create_and_post_order(order, options)
+            response = (
+                self.client.create_and_post_order(order, options, OrderType.GTC)
+                if V2_CLOB_CLIENT
+                else self.client.create_and_post_order(order, options)
+            )
             result = _to_plain(response)
             if not result.get("success") or not result.get("orderID"):
                 details = result.get("errorMsg") or result.get("error") or result.get("status") or str(result)
@@ -447,10 +478,26 @@ class PolyMarketAPI:
             if neg_risk is None:
                 neg_risk = self.client.get_neg_risk(token_id)
 
-            order = MarketOrderArgs(token_id=token_id, amount=float(amount), side=side, order_type=OrderType.FAK)
             options = PartialCreateOrderOptions(tick_size=tick, neg_risk=neg_risk)
-            signed_order = self.client.create_market_order(order, options)
-            response = self.client.post_order(signed_order, OrderType.FAK)
+            if V2_CLOB_CLIENT:
+                worst_price = 0.99 if str(side).upper() == "BUY" else 0.01
+                order = MarketOrderArgs(
+                    token_id=token_id,
+                    amount=float(amount),
+                    side=self._resolve_side(side),
+                    price=worst_price,
+                    order_type=OrderType.FAK,
+                )
+                response = self.client.create_and_post_market_order(order, options, OrderType.FAK)
+            else:
+                order = MarketOrderArgs(
+                    token_id=token_id,
+                    amount=float(amount),
+                    side=side,
+                    order_type=OrderType.FAK,
+                )
+                signed_order = self.client.create_market_order(order, options)
+                response = self.client.post_order(signed_order, OrderType.FAK)
             result = _to_plain(response)
             if not result.get("success") or not result.get("orderID"):
                 details = result.get("errorMsg") or result.get("error") or result.get("status") or str(result)

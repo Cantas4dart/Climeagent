@@ -1,6 +1,9 @@
 from typing import Any
 
-from py_clob_client.client import ClobClient
+try:
+    from py_clob_client_v2 import ClobClient
+except ImportError:
+    from py_clob_client.client import ClobClient
 
 
 class CryptoManager:
@@ -16,7 +19,10 @@ class CryptoManager:
             funder=(options or {}).get("funderAddress") or None,
         )
         try:
-            creds = client.create_or_derive_api_creds()
+            if hasattr(client, "create_or_derive_api_key"):
+                creds = client.create_or_derive_api_key()
+            else:
+                creds = client.create_or_derive_api_creds()
             return {
                 "key": creds.api_key,
                 "secret": creds.api_secret,
