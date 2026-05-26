@@ -59,6 +59,43 @@ class WeatherClient:
         return payload
 
     @staticmethod
+    def _model_temperature_field(label):
+        return {
+            "ecmwf": "temperature_2m_ecmwf_ifs025",
+            "gfs": "temperature_2m_gfs_seamless",
+            "hrrr": "temperature_2m_hrrr",
+        }.get(label)
+
+    def _fetch_open_meteo_payload(self, urls, params, timeout=20):
+        last_error = None
+        for url in urls:
+            try:
+                return self._request_json_with_meta(url, params=params, timeout=timeout)
+            except Exception as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise RuntimeError("Open-Meteo request failed without a captured exception.")
+
+    def _normalize_open_meteo_hourly(self, payload, label):
+        if label not in {"ecmwf", "gfs", "hrrr"}:
+            return payload
+        hourly = payload.get("hourly") if isinstance(payload, dict) else None
+        if not isinstance(hourly, dict):
+            return payload
+        target_field = self._model_temperature_field(label)
+        if not target_field:
+            return payload
+        if target_field in hourly or "temperature_2m" not in hourly:
+            return payload
+
+        normalized = dict(payload)
+        normalized_hourly = dict(hourly)
+        normalized_hourly[target_field] = hourly.get("temperature_2m", [])
+        normalized["hourly"] = normalized_hourly
+        return normalized
+
+    @staticmethod
     def _c_to_f(value):
         return (float(value) * 9.0 / 5.0) + 32.0
 
@@ -118,7 +155,6 @@ class WeatherClient:
     def get_open_meteo_forecast(self, lat, lon, temperature_unit=None):
         """Fetch Open-Meteo baseline forecast."""
         try:
-            url = "https://api.open-meteo.com/v1/forecast"
             params = {
                 "latitude": lat,
                 "longitude": lon,
@@ -128,7 +164,10 @@ class WeatherClient:
             }
             if temperature_unit:
                 params["temperature_unit"] = temperature_unit
-            payload, meta = self._request_json_with_meta(url, params=params)
+            payload, meta = self._fetch_open_meteo_payload(
+                ["https://api.open-meteo.com/v1/forecast", "https://api.open-meteo.com/v1/gfs"],
+                params=params,
+            )
             return {
                 "source": "open-meteo",
                 "fetched_at": self._utc_now_iso(),
@@ -156,7 +195,14 @@ class WeatherClient:
                 params["models"] = models
             if temperature_unit:
                 params["temperature_unit"] = temperature_unit
-            payload, meta = self._request_json_with_meta(base_url, params=params)
+            urls = [base_url]
+            if label == "ecmwf":
+                urls.append("https://api.open-meteo.com/v1/forecast")
+            elif label in {"gfs", "hrrr"}:
+                urls.append("https://api.open-meteo.com/v1/gfs")
+                urls.append("https://api.open-meteo.com/v1/forecast")
+            payload, meta = self._fetch_open_meteo_payload(urls, params=params)
+            payload = self._normalize_open_meteo_hourly(payload, label)
             return {
                 "source": label,
                 "fetched_at": self._utc_now_iso(),
@@ -206,9 +252,10 @@ class WeatherClient:
         gfs = self.get_open_meteo_model_forecast(
             lat,
             lon,
-            "gfs_seamless",
+            None,
             "gfs",
             temperature_unit="fahrenheit",
+            base_url="https://api.open-meteo.com/v1/gfs",
         )
         timezone_name = (
             (noaa or {}).get("timezone")
@@ -232,8 +279,8 @@ class WeatherClient:
 
     def _build_non_us_stack(self, lat, lon):
         baseline = self.get_open_meteo_forecast(lat, lon)
-        ecmwf = self.get_open_meteo_model_forecast(lat, lon, "ecmwf_ifs025", "ecmwf")
-        gfs = self.get_open_meteo_model_forecast(lat, lon, "gfs_seamless", "gfs")
+        ecmwf = self.get_open_meteo_model_forecast(lat, lon, None, "ecmwf", base_url="https://api.open-meteo.com/v1/ecmwf")
+        gfs = self.get_open_meteo_model_forecast(lat, lon, None, "gfs", base_url="https://api.open-meteo.com/v1/gfs")
         timezone_name = (
             (ecmwf or {}).get("timezone")
             or (baseline or {}).get("timezone")
