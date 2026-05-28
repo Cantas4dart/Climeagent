@@ -128,9 +128,7 @@ class TradeExecutor:
                     continue
 
                 max_trade_amount = float(user.max_trade_amount)
-                target_usd = spendable_balance * (float(user.risk_percent) / 100)
-                if target_usd > max_trade_amount:
-                    target_usd = max_trade_amount
+                target_usd = min(spendable_balance, max_trade_amount)
                 size_multiplier = max(0.25, float(signal.get("size_multiplier") or 1))
                 target_usd *= size_multiplier
 
