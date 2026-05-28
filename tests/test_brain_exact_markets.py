@@ -128,6 +128,52 @@ class ExactMarketProbabilityTests(unittest.TestCase):
 
         self.assertEqual(decision["action"], "BUY_YES")
 
+    def test_exact_safety_blocks_fractional_danger_zone(self):
+        decision = self.model.evaluate_market_opportunity(
+            model_prob=0.74,
+            spread=0.01,
+            market_price=0.45,
+            market_context={
+                "days_to_resolution": 0,
+                "local_peak_stage": self.model.REGIME_NEAR_PEAK,
+                "target": {"type": "exact", "val": 31.0},
+                "forecast_avg": 31.45,
+                "temp_dispersion": 0.04,
+                "calibration_buckets": {},
+                "settlement_risk": 0.0,
+                "rounding_risk": 0.0,
+                "station_mismatch_risk": 0.0,
+                "observation_progress": 0.9,
+                "exact_target_distance": 0.45,
+            },
+        )
+
+        self.assertFalse(decision["should_trade"])
+        self.assertTrue(any("Exact safety block" in reason for reason in decision["reasons"]))
+
+    def test_exact_safety_blocks_high_dispersion(self):
+        decision = self.model.evaluate_market_opportunity(
+            model_prob=0.74,
+            spread=0.01,
+            market_price=0.45,
+            market_context={
+                "days_to_resolution": 0,
+                "local_peak_stage": self.model.REGIME_NEAR_PEAK,
+                "target": {"type": "exact", "val": 31.0},
+                "forecast_avg": 31.20,
+                "temp_dispersion": 0.26,
+                "calibration_buckets": {},
+                "settlement_risk": 0.0,
+                "rounding_risk": 0.0,
+                "station_mismatch_risk": 0.0,
+                "observation_progress": 0.9,
+                "exact_target_distance": 0.20,
+            },
+        )
+
+        self.assertFalse(decision["should_trade"])
+        self.assertTrue(any("dispersion" in reason for reason in decision["reasons"]))
+
     def test_integer_range_probability_uses_whole_degree_bucket_semantics(self):
         target = {"type": "range", "low": 86.0, "high": 87.0}
 
@@ -146,6 +192,32 @@ class ExactMarketProbabilityTests(unittest.TestCase):
 
         self.assertGreater(prob, 0.5)
         self.assertLess(prob, next_degree_prob)
+
+    def test_range_threshold_safety_applies_low_dispersion_buffer(self):
+        reason, multiplier = self.model._assess_range_threshold_safety(
+            {
+                "target": {"type": "range", "low": 72.0, "high": 73.0},
+                "forecast_avg": 72.6,
+                "temp_dispersion": 0.03,
+            },
+            self.model.REGIME_NEAR_PEAK,
+        )
+
+        self.assertEqual(reason, "Low-dispersion range settlement buffer")
+        self.assertEqual(multiplier, 1.03)
+
+    def test_threshold_safety_adds_near_peak_boundary_conservatism(self):
+        reason, multiplier = self.model._assess_range_threshold_safety(
+            {
+                "target": {"type": "threshold", "direction": "above", "val": 72.0},
+                "forecast_avg": 72.2,
+                "temp_dispersion": 0.03,
+            },
+            self.model.REGIME_NEAR_PEAK,
+        )
+
+        self.assertEqual(reason, "Threshold near-boundary late-day conservatism")
+        self.assertEqual(multiplier, 0.95)
 
     def test_same_day_us_range_wrong_side_cluster_does_not_buy_yes(self):
         decision = self.model.evaluate_market_opportunity(

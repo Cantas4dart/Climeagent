@@ -28,6 +28,9 @@ class TradingModel:
     MIN_CONFIDENCE_SCORE = 0.80
     SELECTIVE_CONFIDENCE_SCORE = 0.85
     EXTREME_CONFIDENCE_SCORE = 0.90
+    EXACT_MIN_CONFIDENCE_SCORE = 0.89
+    EXACT_SELECTIVE_CONFIDENCE_SCORE = 0.93
+    RANGE_THRESHOLD_CONFIDENCE_BUMP = 0.02
     PREFERRED_PRICE_LOW = 0.23
     PREFERRED_PRICE_HIGH = 0.85
     SELECTIVE_PRICE_LOW = 0.20
@@ -293,6 +296,8 @@ class TradingModel:
 
         distance_to_integer = abs(mean - round(mean))
         discrete_weight = 0.30 if distance_to_integer <= 0.20 else 0.18
+        if target["type"] in {"range", "threshold"} and distance_to_integer <= 0.15:
+            discrete_weight += 0.04
         if target["type"] in {"range", "exact"}:
             discrete_weight += 0.10
         if target["type"] == "exact" and round(mean) == float(target["val"]):
@@ -486,9 +491,86 @@ class TradingModel:
 
         if forecast_max < threshold_val and forecast_avg <= (threshold_val - 0.30):
             return True, (
-                f"All forecasts remain below the {threshold_val:.1f} threshold floor for this same-day US ladder"
+            f"All forecasts remain below the {threshold_val:.1f} threshold floor for this same-day US ladder"
             )
         return False, None
+
+    def _assess_exact_safety(self, market_context, spread):
+        target = (market_context or {}).get("target") or {}
+        if str(target.get("type") or "") != "exact":
+            return None, 1.0
+
+        forecast_mean = market_context.get("forecast_avg")
+        if forecast_mean is None:
+            return None, 1.0
+
+        forecast_mean = float(forecast_mean)
+        target_val = float(target.get("val", 0.0))
+        raw_distance = (market_context or {}).get("exact_target_distance")
+        distance_to_target = abs(float(raw_distance)) if raw_distance is not None else abs(forecast_mean - target_val)
+        if math.isclose(distance_to_target, 0.0, abs_tol=1e-12):
+            distance_to_target = abs(forecast_mean - target_val)
+        fractional_part = forecast_mean - math.floor(forecast_mean)
+        distance_to_integer = abs(forecast_mean - round(forecast_mean))
+        temp_dispersion = float((market_context or {}).get("temp_dispersion", 0.0) or 0.0)
+
+        if 0.35 <= fractional_part <= 0.65 and distance_to_target < 0.85:
+            return (
+                f"Exact safety block: fractional forecast {fractional_part:.2f} is in the adjacent-rung danger zone",
+                0.0,
+            )
+        if temp_dispersion >= 0.26:
+            return f"Exact safety block: temperature dispersion {temp_dispersion:.2f} is too high", 0.0
+        if distance_to_target > 0.50:
+            return f"Exact safety block: forecast is {distance_to_target:.2f} away from target rung", 0.0
+
+        if float(spread or 0.0) > 0.18 and 0.30 < fractional_part < 0.70:
+            return "Exact safety reduction: ensemble spread is high near a rounding boundary", 0.30
+
+        safe_fraction = fractional_part <= 0.30 or fractional_part >= 0.70
+        low_spread = float(spread or 0.0) <= 0.18
+        if distance_to_integer > 0.50 or not low_spread or not safe_fraction:
+            return (
+                f"Exact safety block: setup is not clean_exact "
+                f"(distance={distance_to_integer:.2f}, spread={float(spread or 0.0):.2%}, frac={fractional_part:.2f})",
+                0.0,
+            )
+
+        return "clean_exact", 1.0
+
+    def _assess_range_threshold_safety(self, market_context, regime):
+        target = (market_context or {}).get("target") or {}
+        target_type = str(target.get("type") or "")
+        if target_type not in {"range", "threshold"}:
+            return None, 1.0
+
+        forecast_mean = market_context.get("forecast_avg")
+        if forecast_mean is None:
+            return None, 1.0
+
+        forecast_mean = float(forecast_mean)
+        temp_dispersion = float((market_context or {}).get("temp_dispersion", 0.0) or 0.0)
+        if temp_dispersion > 0.08:
+            return None, 1.0
+
+        if target_type == "threshold":
+            threshold_val = float(target.get("val", 0.0))
+            direction = str(target.get("direction") or "above")
+            boundary = threshold_val + 0.9 if direction == "below" and threshold_val.is_integer() else threshold_val
+            distance_to_boundary = abs(forecast_mean - boundary)
+            if regime == self.REGIME_NEAR_PEAK and distance_to_boundary <= 0.35:
+                return "Threshold near-boundary late-day conservatism", 0.95
+            if distance_to_boundary >= 0.70:
+                return "Low-dispersion threshold settlement buffer", 1.03
+
+        if target_type == "range":
+            low = float(target.get("low", 0.0))
+            high = float(target.get("high", low))
+            ceiling = high + 0.9 if low.is_integer() and high.is_integer() else high
+            if low + 0.25 <= forecast_mean <= ceiling - 0.25:
+                return "Low-dispersion range settlement buffer", 1.03
+
+        return None, 1.0
 
     def _required_edge(self, model_prob, regime, market_price):
         region = self._probability_region(model_prob)
@@ -889,6 +971,14 @@ class TradingModel:
             calibrated_prob = adjusted_prob
         else:
             calibrated_prob = self.bayesian_calibration_adjustment(adjusted_prob, calibration_buckets)
+
+        range_threshold_safety_reason, range_threshold_multiplier = self._assess_range_threshold_safety(
+            market_context,
+            regime,
+        )
+        if range_threshold_multiplier != 1.0:
+            calibrated_prob = 0.5 + ((calibrated_prob - 0.5) * range_threshold_multiplier)
+            calibrated_prob = min(max(calibrated_prob, 0.0), 1.0)
         
         # Use calibrated probability for final edge calculation
         final_edge = self.get_edge(calibrated_prob, market_price)
@@ -896,6 +986,7 @@ class TradingModel:
         final_trade_side = "YES" if final_edge > 0 else "NO"
         final_mode = "extreme_mispricing" if final_abs_edge >= self.EXTREME_EDGE_THRESHOLD else "standard"
 
+        exact_safety_reason, exact_safety_multiplier = self._assess_exact_safety(market_context, spread)
         exact_no_blocked, exact_no_block_reason = self._should_block_exact_no_near_peak(calibrated_prob, market_context)
         if exact_no_blocked:
             calibrated_prob = max(calibrated_prob, min(market_price + 0.02, 0.99))
@@ -930,6 +1021,21 @@ class TradingModel:
         spread_limit = self._segment_spread_cap(base_spread_limit, final_trade_side, regime, final_mode, price_band)
         required_edge = self._segment_required_edge(base_required_edge, final_trade_side, regime, final_mode, price_band)
         required_confidence = self._segment_confidence_floor(final_trade_side, regime, final_mode, price_band)
+        target_type = str((market_context.get("target") or {}).get("type") or "")
+        if target_type == "exact":
+            if price_band == "preferred":
+                required_confidence = max(required_confidence, self.EXACT_MIN_CONFIDENCE_SCORE)
+            else:
+                required_confidence = max(required_confidence, self.EXACT_SELECTIVE_CONFIDENCE_SCORE)
+        elif target_type in {"range", "threshold"}:
+            required_confidence = min(required_confidence + self.RANGE_THRESHOLD_CONFIDENCE_BUMP, 0.995)
+            if (
+                target_type == "threshold"
+                and regime == self.REGIME_NEAR_PEAK
+                and range_threshold_multiplier < 1.0
+            ):
+                required_edge = round(required_edge + 0.02, 4)
+                required_confidence = min(required_confidence + 0.01, 0.995)
         settlement_risk = float(market_context.get("settlement_risk", 0.0) or 0.0)
         rounding_risk = float(market_context.get("rounding_risk", 0.0) or 0.0)
         station_mismatch_risk = float(market_context.get("station_mismatch_risk", 0.0) or 0.0)
@@ -1014,6 +1120,8 @@ class TradingModel:
             )
         if exact_no_block_reason and final_trade_side == "NO":
             reasons.append(exact_no_block_reason)
+        if exact_safety_reason and exact_safety_multiplier <= 0.0:
+            reasons.append(exact_safety_reason)
         if wrong_side_yes_block_reason and final_trade_side == "YES":
             reasons.append(wrong_side_yes_block_reason)
 
@@ -1034,6 +1142,10 @@ class TradingModel:
                 size_multiplier *= 0.72 if final_mode == "extreme_mispricing" else 0.82
             elif regime == self.REGIME_NEAR_PEAK and price_band == "preferred":
                 size_multiplier *= 1.08
+            if target_type == "exact":
+                size_multiplier *= exact_safety_multiplier
+            elif target_type in {"range", "threshold"}:
+                size_multiplier *= range_threshold_multiplier
             size_multiplier = round(size_multiplier, 2)
 
         # FIX 3: Debug logging - track edge vs confidence priority
