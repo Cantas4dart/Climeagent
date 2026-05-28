@@ -439,9 +439,17 @@ class PolyMarketAPI:
             raise ValueError("Client not initialized")
         return _to_plain(self.client.get_orders())
 
-    def place_limit_order(self, token_id: str, side: str, price: float, size: int):
+    def _require_v2_order_client(self):
+        if not V2_CLOB_CLIENT:
+            raise RuntimeError(
+                "Polymarket CLOB v2 order placement requires py-clob-client-v2. "
+                "Install dependencies from requirements.txt before running live trading."
+            )
+
+    def place_limit_order(self, token_id: str, side: str, price: float, size: float):
         if not self.client:
             raise ValueError("Client not initialized")
+        self._require_v2_order_client()
         print(f"[POLY] Placing {side} order for {token_id}: {size} shares @ {price}")
         try:
             book = self.client.get_order_book(token_id)
@@ -452,11 +460,7 @@ class PolyMarketAPI:
 
             order = OrderArgs(token_id=token_id, price=price, size=float(size), side=self._resolve_side(side))
             options = PartialCreateOrderOptions(tick_size=tick, neg_risk=neg_risk)
-            response = (
-                self.client.create_and_post_order(order, options, OrderType.GTC)
-                if V2_CLOB_CLIENT
-                else self.client.create_and_post_order(order, options)
-            )
+            response = self.client.create_and_post_order(order, options, OrderType.GTC)
             result = _to_plain(response)
             if not result.get("success") or not result.get("orderID"):
                 details = result.get("errorMsg") or result.get("error") or result.get("status") or str(result)
@@ -467,9 +471,10 @@ class PolyMarketAPI:
             print(f"[POLY] Order Failed: {exc}")
             raise
 
-    def place_market_order(self, token_id: str, side: str, amount: int):
+    def place_market_order(self, token_id: str, side: str, amount: float):
         if not self.client:
             raise ValueError("Client not initialized")
+        self._require_v2_order_client()
         print(f"[POLY] Placing {side} market order for {token_id}: amount={amount}")
         try:
             book = self.client.get_order_book(token_id)
@@ -479,25 +484,15 @@ class PolyMarketAPI:
                 neg_risk = self.client.get_neg_risk(token_id)
 
             options = PartialCreateOrderOptions(tick_size=tick, neg_risk=neg_risk)
-            if V2_CLOB_CLIENT:
-                worst_price = 0.99 if str(side).upper() == "BUY" else 0.01
-                order = MarketOrderArgs(
-                    token_id=token_id,
-                    amount=float(amount),
-                    side=self._resolve_side(side),
-                    price=worst_price,
-                    order_type=OrderType.FAK,
-                )
-                response = self.client.create_and_post_market_order(order, options, OrderType.FAK)
-            else:
-                order = MarketOrderArgs(
-                    token_id=token_id,
-                    amount=float(amount),
-                    side=side,
-                    order_type=OrderType.FAK,
-                )
-                signed_order = self.client.create_market_order(order, options)
-                response = self.client.post_order(signed_order, OrderType.FAK)
+            worst_price = 0.99 if str(side).upper() == "BUY" else 0.01
+            order = MarketOrderArgs(
+                token_id=token_id,
+                amount=float(amount),
+                side=self._resolve_side(side),
+                price=worst_price,
+                order_type=OrderType.FAK,
+            )
+            response = self.client.create_and_post_market_order(order, options, OrderType.FAK)
             result = _to_plain(response)
             if not result.get("success") or not result.get("orderID"):
                 details = result.get("errorMsg") or result.get("error") or result.get("status") or str(result)

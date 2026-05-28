@@ -228,6 +228,58 @@ class ExecutorLiveBehaviorTests(unittest.TestCase):
 
         self.assertEqual(reserved["count"], 1)
 
+    def test_executor_uses_one_dollar_minimum_with_fractional_shares(self):
+        executor = TradeExecutor.__new__(TradeExecutor)
+        recorded = {"reserved": None, "order": None}
+
+        executor.db = SimpleNamespace(
+            get_unsettled_trade_count=lambda tg_id: 0,
+            has_traded=lambda tg_id, market_id: False,
+            reserve_trade=lambda trade: recorded.__setitem__("reserved", trade) or 1,
+            mark_trade_submitted=lambda tg_id, market_id, order_id: None,
+            release_trade_reservation=lambda tg_id, market_id: None,
+        )
+        executor.reserved_capital_by_user = {}
+        executor.send_trade_alert = lambda *args, **kwargs: None
+
+        def place_limit_order(token_id, side, price, size):
+            recorded["order"] = (token_id, side, price, size)
+            return {"orderID": "ord-3", "status": "live"}
+
+        poly = SimpleNamespace(
+            get_balance=lambda: {"balance": "4900000", "allowance": "100000000"},
+            get_market_by_id=lambda market_id: {"clobTokenIds": "[\"yes-token\", \"no-token\"]"},
+            place_limit_order=place_limit_order,
+        )
+        executor.build_poly_client = lambda user, account_config: poly
+
+        user = SimpleNamespace(
+            tg_id="u1",
+            max_open_positions=3,
+            risk_percent=10,
+            max_trade_amount=10,
+        )
+        signals = [
+            {
+                "market_id": "m1",
+                "question": "Will it be hot?",
+                "action": "BUY_NO",
+                "mode": "standard",
+                "confidence_score": 0.77,
+                "market_price": 0.849,
+                "entry_price": 0.849,
+                "market_price_yes": 0.151,
+                "market_price_no": 0.849,
+                "condition_id": "cond-1",
+            }
+        ]
+
+        executor.process_real_user_signals(user, signals)
+
+        self.assertAlmostEqual(recorded["reserved"]["size"], 1.177856, places=6)
+        self.assertEqual(recorded["order"][0], "no-token")
+        self.assertAlmostEqual(recorded["order"][3], 1.177856, places=6)
+
 
 class SettlementLiveBehaviorTests(unittest.TestCase):
     def test_check_settlements_marks_live_trade_settled(self):
@@ -406,6 +458,17 @@ class ClobV2CompatibilityTests(unittest.TestCase):
             polymarket_module.OrderType = original_order_type
 
         self.assertEqual(result["orderID"], "mkt-v2")
+
+    def test_order_placement_requires_v2_client(self):
+        poly = PolyMarketAPI.__new__(PolyMarketAPI)
+        poly.client = SimpleNamespace()
+        original_flag = polymarket_module.V2_CLOB_CLIENT
+        try:
+            polymarket_module.V2_CLOB_CLIENT = False
+            with self.assertRaisesRegex(RuntimeError, "py-clob-client-v2"):
+                poly.place_limit_order("token-1", "BUY", 0.3, 4)
+        finally:
+            polymarket_module.V2_CLOB_CLIENT = original_flag
 
 
 class RelayClientHeaderTests(unittest.TestCase):

@@ -13,6 +13,9 @@ from .db import DBManager, User
 from .polymarket import PolyMarketAPI, extract_allowance_amount
 from .singleton import acquire_process_lock
 
+MIN_TRADE_NOTIONAL_USD = 1.0
+SHARE_SIZE_PRECISION = 6
+
 
 def extract_allowance(balance_data: dict[str, Any]) -> float:
     return extract_allowance_amount(balance_data)
@@ -124,17 +127,23 @@ class TradeExecutor:
                     print("[PYEXEC] Master Auto-approval transactions sent.")
                     continue
 
+                max_trade_amount = float(user.max_trade_amount)
                 target_usd = spendable_balance * (float(user.risk_percent) / 100)
-                if target_usd > float(user.max_trade_amount):
-                    target_usd = float(user.max_trade_amount)
+                if target_usd > max_trade_amount:
+                    target_usd = max_trade_amount
                 size_multiplier = max(0.25, float(signal.get("size_multiplier") or 1))
                 target_usd *= size_multiplier
 
                 entry_price = float(signal.get("entry_price") or signal.get("market_price"))
-                size = int(target_usd // entry_price)
+                if target_usd < MIN_TRADE_NOTIONAL_USD and spendable_balance >= MIN_TRADE_NOTIONAL_USD and max_trade_amount >= MIN_TRADE_NOTIONAL_USD:
+                    target_usd = MIN_TRADE_NOTIONAL_USD
+                size = round(target_usd / entry_price, SHARE_SIZE_PRECISION) if entry_price > 0 else 0.0
                 reserved_cost = size * entry_price
-                if size < 1:
-                    print(f"[PYEXEC] Balance too low to place trade for {user.tg_id}")
+                if target_usd < MIN_TRADE_NOTIONAL_USD or size <= 0:
+                    print(
+                        f"[PYEXEC] Balance too low to place trade for {user.tg_id} "
+                        f"(target=${target_usd:.2f}, minimum=${MIN_TRADE_NOTIONAL_USD:.2f})"
+                    )
                     continue
 
                 market_data = poly.get_market_by_id(market_id)
@@ -267,11 +276,16 @@ class TradeExecutor:
             if assessment["exitFraction"] <= 0:
                 continue
 
-            remaining_size = max(0, int(trade.remaining_size or trade.size or 0))
-            if remaining_size < 1:
+            remaining_size = max(0.0, float(trade.remaining_size or trade.size or 0))
+            if remaining_size <= 0:
                 continue
 
-            shares_to_sell = max(1, min(remaining_size, int(remaining_size * assessment["exitFraction"])))
+            shares_to_sell = min(
+                remaining_size,
+                round(remaining_size * assessment["exitFraction"], SHARE_SIZE_PRECISION),
+            )
+            if shares_to_sell <= 0:
+                continue
             poly = self.build_poly_client(user, resolve_user_polymarket_account_config(user))
 
             if trade.tg_id not in open_order_ids_by_user:
@@ -299,13 +313,13 @@ class TradeExecutor:
                 clob_token_ids = json.loads(market_data.get("clobTokenIds") or "[]")
                 token_id = clob_token_ids[0] if trade.side == "YES" else clob_token_ids[1]
                 order_response = poly.place_market_order(token_id, "SELL", shares_to_sell)
-                new_remaining_size = max(0, remaining_size - shares_to_sell)
+                new_remaining_size = max(0.0, round(remaining_size - shares_to_sell, SHARE_SIZE_PRECISION))
                 exit_price = (
                     float(state.get("market_price_yes", trade.buy_price or 0))
                     if trade.side == "YES"
                     else float(state.get("market_price_no", trade.buy_price or 0))
                 )
-                fully_closed = new_remaining_size < 1
+                fully_closed = new_remaining_size <= 0
                 self.db.record_trade_exit(trade.id, new_remaining_size, exit_price, assessment["reason"], fully_closed)
                 self.send_exit_alert(
                     trade.tg_id,
@@ -469,7 +483,7 @@ class TradeExecutor:
         signal: dict[str, Any],
         side: str,
         entry_price: float,
-        size: int,
+        size: float,
         order_response: dict[str, Any],
     ):
         lines = [
@@ -495,8 +509,8 @@ class TradeExecutor:
         tg_id: str,
         trade: Any,
         state: dict[str, Any],
-        shares_sold: int,
-        remaining_size: int,
+        shares_sold: float,
+        remaining_size: float,
         assessment: dict[str, Any],
         order_response: dict[str, Any],
     ):
