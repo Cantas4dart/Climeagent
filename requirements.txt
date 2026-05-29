@@ -1,6 +1,7 @@
 requests
 pandas
 py-clob-client-v2
+py-builder-signing-sdk
 python-dotenv
 web3
 cryptography

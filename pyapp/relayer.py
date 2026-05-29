@@ -8,10 +8,15 @@ import requests
 from eth_account import Account
 from eth_account.messages import encode_defunct, encode_typed_data
 from eth_utils import keccak, to_bytes
-from py_builder_signing_sdk.config import BuilderConfig
-from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 from requests.exceptions import RequestException
 from web3 import Web3
+
+try:
+    from py_builder_signing_sdk.config import BuilderConfig
+    from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
+except ImportError:
+    BuilderConfig = Any
+    BuilderApiKeyCreds = None
 
 
 PROXY_INIT_CODE_HASH = "0xd21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b"
@@ -433,6 +438,10 @@ def build_builder_config_from_env() -> BuilderConfig | None:
     if not key or not secret or not passphrase:
         raise ValueError(
             "Proxy wallet approval needs relayer credentials. Set RELAYER_API_KEY and RELAYER_API_KEY_ADDRESS, or set POLY_BUILDER_API_KEY, POLY_BUILDER_SECRET, and POLY_BUILDER_PASSPHRASE."
+        )
+    if BuilderApiKeyCreds is None:
+        raise ValueError(
+            "Builder credential auth requires py-builder-signing-sdk. Install dependencies from requirements.txt, or set RELAYER_API_KEY and RELAYER_API_KEY_ADDRESS."
         )
     return BuilderConfig(
         local_builder_creds=BuilderApiKeyCreds(
