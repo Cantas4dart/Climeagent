@@ -2,8 +2,10 @@ from brain.markets import MarketClient
 from brain.weather import WeatherClient
 import json
 import sys
+import unittest
 
 # Ensure UTF-8 output even on Windows if possible, but we'll remove emojis just in case
+@unittest.skip("Requires live network access to Polymarket and weather APIs")
 def test_live_capture():
     print("--- SIGNAL CATCHING TEST START ---")
     
@@ -35,7 +37,9 @@ def test_live_capture():
             print(f"Sample Question: {markets[0].get('question')}")
         return
 
-    lat, lon, is_us = location_data
+    lat = location_data.get("lat")
+    lon = location_data.get("lon")
+    is_us = location_data.get("is_us")
     print(f"[2/3] Successfully parsed market location:")
     print(f"      Question: {target_market['question']}")
     print(f"      Coordinates: {lat}, {lon} (US: {is_us})")
