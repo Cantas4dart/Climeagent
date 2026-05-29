@@ -24,7 +24,10 @@ try:
         PartialCreateOrderOptions,
         Side,
     )
-    from py_clob_client_v2.order_builder.constants import COLLATERAL as COLLATERAL_ASSET_TYPE
+    try:
+        from py_clob_client_v2.order_builder.constants import COLLATERAL as COLLATERAL_ASSET_TYPE
+    except ImportError:
+        COLLATERAL_ASSET_TYPE = "COLLATERAL"
     BalanceAllowanceParams = None
     V2_CLOB_CLIENT = True
 except ImportError:
@@ -40,7 +43,7 @@ except ImportError:
     )
     Side = None
     COLLATERAL_ASSET_TYPE = AssetType.COLLATERAL
-    V2_CLOB_CLIENT = hasattr(ClobClient, "create_and_post_order") or hasattr(ClobClient, "create_market_order")
+    V2_CLOB_CLIENT = False
 
 load_dotenv()
 
@@ -251,11 +254,6 @@ class PolyMarketAPI:
         for attempt in range(1, retries + 1):
             try:
                 if V2_CLOB_CLIENT:
-                    if BalanceAllowanceParams is not None:
-                        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-                        if hasattr(self.client, "update_balance_allowance"):
-                            self.client.update_balance_allowance(params)
-                        return _to_plain(self.client.get_balance_allowance(params))
                     try:
                         return _to_plain(self.client.get_balance_allowance(COLLATERAL_ASSET_TYPE))
                     except TypeError:
@@ -451,8 +449,9 @@ class PolyMarketAPI:
     def _require_v2_order_client(self):
         if not V2_CLOB_CLIENT:
             raise RuntimeError(
-                "Polymarket CLOB order placement requires a py-clob-client build with order helpers. "
-                "Install dependencies from requirements.txt before running live trading."
+                "Polymarket CLOB order placement requires py-clob-client-v2>=1.0.1. "
+                "The archived py-clob-client signs old CLOB v1 orders that Polymarket now rejects with "
+                "order_version_mismatch. Install dependencies from requirements.txt before running live trading."
             )
         if not hasattr(self.client, "get_order_book"):
             raise RuntimeError(

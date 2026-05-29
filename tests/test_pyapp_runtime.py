@@ -468,39 +468,24 @@ class ProxyApprovalMigrationTests(unittest.TestCase):
 
 
 class ClobV2CompatibilityTests(unittest.TestCase):
-    def test_v2_balance_uses_params_when_legacy_client_requires_them(self):
+    def test_v2_balance_allows_no_arg_client(self):
         poly = PolyMarketAPI.__new__(PolyMarketAPI)
-        calls = {"updated": None, "balance": None}
 
-        class FakeParams:
-            def __init__(self, asset_type):
-                self.asset_type = asset_type
-                self.signature_type = -1
-
-        class LegacyBalanceClient:
-            def update_balance_allowance(self, params):
-                calls["updated"] = params
-
-            def get_balance_allowance(self, params):
-                calls["balance"] = params
+        class NoArgBalanceClient:
+            def get_balance_allowance(self, *args):
+                if args:
+                    raise TypeError("unexpected collateral argument")
                 return {"balance": "1000000", "allowance": "1000000"}
 
-        poly.client = LegacyBalanceClient()
+        poly.client = NoArgBalanceClient()
         original_flag = polymarket_module.V2_CLOB_CLIENT
-        original_params = polymarket_module.BalanceAllowanceParams
-        original_asset_type = polymarket_module.AssetType
         try:
             polymarket_module.V2_CLOB_CLIENT = True
-            polymarket_module.BalanceAllowanceParams = FakeParams
-            polymarket_module.AssetType = SimpleNamespace(COLLATERAL="COLLATERAL")
             result = poly.get_balance()
         finally:
             polymarket_module.V2_CLOB_CLIENT = original_flag
-            polymarket_module.BalanceAllowanceParams = original_params
-            polymarket_module.AssetType = original_asset_type
 
         self.assertEqual(result["balance"], "1000000")
-        self.assertIs(calls["updated"], calls["balance"])
 
     def test_v2_limit_orders_use_gtc_submission(self):
         poly = PolyMarketAPI.__new__(PolyMarketAPI)
@@ -558,7 +543,7 @@ class ClobV2CompatibilityTests(unittest.TestCase):
         original_flag = polymarket_module.V2_CLOB_CLIENT
         try:
             polymarket_module.V2_CLOB_CLIENT = False
-            with self.assertRaisesRegex(RuntimeError, "py-clob-client build with order helpers"):
+            with self.assertRaisesRegex(RuntimeError, "py-clob-client-v2>=1.0.1"):
                 poly.place_limit_order("token-1", "BUY", 0.3, 4)
         finally:
             polymarket_module.V2_CLOB_CLIENT = original_flag

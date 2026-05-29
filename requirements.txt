@@ -1,6 +1,6 @@
 requests
 pandas
-py-clob-client-v2
+py-clob-client-v2>=1.0.1
 py-builder-signing-sdk
 python-dotenv
 web3
