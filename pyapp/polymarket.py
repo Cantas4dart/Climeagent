@@ -1,5 +1,6 @@
 import json
 import os
+import inspect
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -39,7 +40,7 @@ except ImportError:
     )
     Side = None
     COLLATERAL_ASSET_TYPE = AssetType.COLLATERAL
-    V2_CLOB_CLIENT = False
+    V2_CLOB_CLIENT = hasattr(ClobClient, "create_and_post_order") or hasattr(ClobClient, "create_market_order")
 
 load_dotenv()
 
@@ -442,9 +443,50 @@ class PolyMarketAPI:
     def _require_v2_order_client(self):
         if not V2_CLOB_CLIENT:
             raise RuntimeError(
-                "Polymarket CLOB v2 order placement requires py-clob-client-v2. "
+                "Polymarket CLOB order placement requires a py-clob-client build with order helpers. "
                 "Install dependencies from requirements.txt before running live trading."
             )
+        if not hasattr(self.client, "get_order_book"):
+            raise RuntimeError(
+                "Polymarket CLOB order placement client is missing required methods: get_order_book"
+            )
+        has_one_step_order = hasattr(self.client, "create_and_post_order") or hasattr(
+            self.client,
+            "create_and_post_market_order",
+        )
+        has_two_step_order = hasattr(self.client, "post_order") and (
+            hasattr(self.client, "create_order") or hasattr(self.client, "create_market_order")
+        )
+        if not has_one_step_order and not has_two_step_order:
+            raise RuntimeError(
+                "Polymarket CLOB order placement client is missing required order submission methods"
+            )
+
+    def _submit_limit_order(self, order, options):
+        create_and_post = getattr(self.client, "create_and_post_order", None)
+        if create_and_post:
+            parameter_count = len(inspect.signature(create_and_post).parameters)
+            if parameter_count >= 3:
+                return create_and_post(order, options, OrderType.GTC)
+            return create_and_post(order, options)
+
+        signed_order = self.client.create_order(order, options)
+        return self.client.post_order(signed_order, OrderType.GTC)
+
+    def _submit_market_order(self, order, options):
+        create_and_post_market = getattr(self.client, "create_and_post_market_order", None)
+        if create_and_post_market:
+            parameter_count = len(inspect.signature(create_and_post_market).parameters)
+            if parameter_count >= 3:
+                return create_and_post_market(order, options, OrderType.FAK)
+            return create_and_post_market(order, options)
+
+        create_market_order = getattr(self.client, "create_market_order", None)
+        if create_market_order:
+            signed_order = create_market_order(order, options)
+        else:
+            signed_order = self.client.create_order(order, options)
+        return self.client.post_order(signed_order, OrderType.FAK)
 
     def place_limit_order(self, token_id: str, side: str, price: float, size: float):
         if not self.client:
@@ -460,7 +502,7 @@ class PolyMarketAPI:
 
             order = OrderArgs(token_id=token_id, price=price, size=float(size), side=self._resolve_side(side))
             options = PartialCreateOrderOptions(tick_size=tick, neg_risk=neg_risk)
-            response = self.client.create_and_post_order(order, options, OrderType.GTC)
+            response = self._submit_limit_order(order, options)
             result = _to_plain(response)
             if not result.get("success") or not result.get("orderID"):
                 details = result.get("errorMsg") or result.get("error") or result.get("status") or str(result)
@@ -492,7 +534,7 @@ class PolyMarketAPI:
                 price=worst_price,
                 order_type=OrderType.FAK,
             )
-            response = self.client.create_and_post_market_order(order, options, OrderType.FAK)
+            response = self._submit_market_order(order, options)
             result = _to_plain(response)
             if not result.get("success") or not result.get("orderID"):
                 details = result.get("errorMsg") or result.get("error") or result.get("status") or str(result)

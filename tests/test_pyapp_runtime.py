@@ -516,7 +516,7 @@ class ClobV2CompatibilityTests(unittest.TestCase):
         original_flag = polymarket_module.V2_CLOB_CLIENT
         try:
             polymarket_module.V2_CLOB_CLIENT = False
-            with self.assertRaisesRegex(RuntimeError, "py-clob-client-v2"):
+            with self.assertRaisesRegex(RuntimeError, "py-clob-client build with order helpers"):
                 poly.place_limit_order("token-1", "BUY", 0.3, 4)
         finally:
             polymarket_module.V2_CLOB_CLIENT = original_flag
