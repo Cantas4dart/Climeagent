@@ -6,7 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pyapp.bot import TelegramPollingBot, relayer_mode_for_signature_type, signature_type_label
+from pyapp.bot import (
+    TelegramPollingBot,
+    build_paper_report_message,
+    build_real_report_message,
+    relayer_mode_for_signature_type,
+    signature_type_label,
+)
 from pyapp.executor import TradeExecutor
 from pyapp.main import _spawn, run_selected
 from pyapp.polymarket import PolyMarketAPI, extract_allowance_amount
@@ -460,6 +466,40 @@ class ProxyApprovalMigrationTests(unittest.TestCase):
 
 
 class ClobV2CompatibilityTests(unittest.TestCase):
+    def test_v2_balance_uses_params_when_legacy_client_requires_them(self):
+        poly = PolyMarketAPI.__new__(PolyMarketAPI)
+        calls = {"updated": None, "balance": None}
+
+        class FakeParams:
+            def __init__(self, asset_type):
+                self.asset_type = asset_type
+                self.signature_type = -1
+
+        class LegacyBalanceClient:
+            def update_balance_allowance(self, params):
+                calls["updated"] = params
+
+            def get_balance_allowance(self, params):
+                calls["balance"] = params
+                return {"balance": "1000000", "allowance": "1000000"}
+
+        poly.client = LegacyBalanceClient()
+        original_flag = polymarket_module.V2_CLOB_CLIENT
+        original_params = polymarket_module.BalanceAllowanceParams
+        original_asset_type = polymarket_module.AssetType
+        try:
+            polymarket_module.V2_CLOB_CLIENT = True
+            polymarket_module.BalanceAllowanceParams = FakeParams
+            polymarket_module.AssetType = SimpleNamespace(COLLATERAL="COLLATERAL")
+            result = poly.get_balance()
+        finally:
+            polymarket_module.V2_CLOB_CLIENT = original_flag
+            polymarket_module.BalanceAllowanceParams = original_params
+            polymarket_module.AssetType = original_asset_type
+
+        self.assertEqual(result["balance"], "1000000")
+        self.assertIs(calls["updated"], calls["balance"])
+
     def test_v2_limit_orders_use_gtc_submission(self):
         poly = PolyMarketAPI.__new__(PolyMarketAPI)
         poly.client = SimpleNamespace(
@@ -571,6 +611,39 @@ class BalanceAllowanceParsingTests(unittest.TestCase):
         )
 
         self.assertEqual(amount, 2500000.0)
+
+
+class ReportFormattingTests(unittest.TestCase):
+    def test_paper_all_time_report_accepts_dict_stats(self):
+        stats = {
+            "total": 2,
+            "settled": 1,
+            "wins": 1,
+            "losses": 0,
+            "pnl": 0.34,
+            "winRate": "100.0",
+        }
+
+        text = build_paper_report_message("All-Time", stats, stats)
+
+        self.assertIn("Paper All-Time Statistics", text)
+        self.assertIn("Trades", text)
+        self.assertIn("2", text)
+
+    def test_real_all_time_report_accepts_dict_stats(self):
+        stats = {
+            "total": 2,
+            "settled": 1,
+            "wins": 1,
+            "losses": 0,
+            "pnl": 0.34,
+            "winRate": "100.0",
+        }
+
+        text = build_real_report_message("All-Time", stats, stats)
+
+        self.assertIn("Live Trading All-Time Statistics", text)
+        self.assertIn("Total Trades Executed", text)
 
 
 class DashboardSyncTests(unittest.TestCase):

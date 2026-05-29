@@ -251,7 +251,15 @@ class PolyMarketAPI:
         for attempt in range(1, retries + 1):
             try:
                 if V2_CLOB_CLIENT:
-                    return _to_plain(self.client.get_balance_allowance(COLLATERAL_ASSET_TYPE))
+                    if BalanceAllowanceParams is not None:
+                        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                        if hasattr(self.client, "update_balance_allowance"):
+                            self.client.update_balance_allowance(params)
+                        return _to_plain(self.client.get_balance_allowance(params))
+                    try:
+                        return _to_plain(self.client.get_balance_allowance(COLLATERAL_ASSET_TYPE))
+                    except TypeError:
+                        return _to_plain(self.client.get_balance_allowance())
                 params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
                 self.client.update_balance_allowance(params)
                 return _to_plain(self.client.get_balance_allowance(params))

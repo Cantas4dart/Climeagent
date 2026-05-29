@@ -249,15 +249,21 @@ def build_paper_stats_lines(paper_stats: dict[str, Any]) -> list[str]:
     ]
 
 
-def build_report_section(title: str, stats: TradeStats, pnl_digits: int = 2) -> list[str]:
+def stat_value(stats: Any, key: str, default: Any = 0) -> Any:
+    if isinstance(stats, dict):
+        return stats.get(key, default)
+    return getattr(stats, key, default)
+
+
+def build_report_section(title: str, stats: Any, pnl_digits: int = 2) -> list[str]:
     return [
         title,
-        format_key_value("Trades", stats.total),
-        format_key_value("Settled", stats.settled),
-        format_key_value("Wins", stats.wins),
-        format_key_value("Losses", stats.losses),
-        format_key_value("Win Rate", f"{stats.winRate}%"),
-        format_key_value("PnL", f"{float(stats.pnl):.{pnl_digits}f} pUSD"),
+        format_key_value("Trades", stat_value(stats, "total")),
+        format_key_value("Settled", stat_value(stats, "settled")),
+        format_key_value("Wins", stat_value(stats, "wins")),
+        format_key_value("Losses", stat_value(stats, "losses")),
+        format_key_value("Win Rate", f"{stat_value(stats, 'winRate', '0.0')}%"),
+        format_key_value("PnL", f"{float(stat_value(stats, 'pnl', 0.0)):.{pnl_digits}f} pUSD"),
     ]
 
 
@@ -277,12 +283,12 @@ def build_paper_report_message(period: str, stats: Any, overall: dict[str, Any])
         *build_report_section(f"{period_label} Paper Tests", stats, 3),
         "",
         "Cumulative Paper Testing",
-        format_key_value("Total Simulated Trades", overall["total"]),
-        format_key_value("Signals Tracked", overall["settled"]),
-        format_key_value("Wins", overall["wins"]),
-        format_key_value("Losses", overall["losses"]),
-        format_key_value("Test Hit Rate", f"{overall['winRate']}%"),
-        format_key_value("Cumulative Paper PnL", f"{float(overall['pnl']):.3f} pUSD"),
+        format_key_value("Total Simulated Trades", stat_value(overall, "total")),
+        format_key_value("Signals Tracked", stat_value(overall, "settled")),
+        format_key_value("Wins", stat_value(overall, "wins")),
+        format_key_value("Losses", stat_value(overall, "losses")),
+        format_key_value("Test Hit Rate", f"{stat_value(overall, 'winRate', '0.0')}%"),
+        format_key_value("Cumulative Paper PnL", f"{float(stat_value(overall, 'pnl', 0.0)):.3f} pUSD"),
     ]
     return wrap_code_block([str(line) for line in lines])
 
@@ -303,12 +309,12 @@ def build_real_report_message(period: str, stats: Any, overall: TradeStats) -> s
         *build_report_section(f"{period_label} Live Trades", stats, 2),
         "",
         "Cumulative Live Trading",
-        format_key_value("Total Trades Executed", overall.total),
-        format_key_value("Settled Positions", overall.settled),
-        format_key_value("Wins", overall.wins),
-        format_key_value("Losses", overall.losses),
-        format_key_value("Live Win Rate", f"{overall.winRate}%"),
-        format_key_value("Cumulative Live PnL", f"{float(overall.pnl):.2f} pUSD"),
+        format_key_value("Total Trades Executed", stat_value(overall, "total")),
+        format_key_value("Settled Positions", stat_value(overall, "settled")),
+        format_key_value("Wins", stat_value(overall, "wins")),
+        format_key_value("Losses", stat_value(overall, "losses")),
+        format_key_value("Live Win Rate", f"{stat_value(overall, 'winRate', '0.0')}%"),
+        format_key_value("Cumulative Live PnL", f"{float(stat_value(overall, 'pnl', 0.0)):.2f} pUSD"),
     ]
     return wrap_code_block([str(line) for line in lines])
 
