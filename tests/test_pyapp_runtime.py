@@ -468,24 +468,58 @@ class ProxyApprovalMigrationTests(unittest.TestCase):
 
 
 class ClobV2CompatibilityTests(unittest.TestCase):
-    def test_v2_balance_allows_no_arg_client(self):
+    def test_v2_balance_uses_balance_allowance_params(self):
         poly = PolyMarketAPI.__new__(PolyMarketAPI)
+        calls = {"params": None}
 
-        class NoArgBalanceClient:
-            def get_balance_allowance(self, *args):
-                if args:
-                    raise TypeError("unexpected collateral argument")
+        class FakeBalanceAllowanceParams:
+            def __init__(self, asset_type):
+                self.asset_type = asset_type
+
+        class BalanceParamsClient:
+            def get_balance_allowance(self, params):
+                calls["params"] = params
                 return {"balance": "1000000", "allowance": "1000000"}
 
-        poly.client = NoArgBalanceClient()
+        poly.client = BalanceParamsClient()
         original_flag = polymarket_module.V2_CLOB_CLIENT
+        original_params = polymarket_module.BalanceAllowanceParams
+        original_asset_type = polymarket_module.AssetType
         try:
             polymarket_module.V2_CLOB_CLIENT = True
+            polymarket_module.BalanceAllowanceParams = FakeBalanceAllowanceParams
+            polymarket_module.AssetType = SimpleNamespace(COLLATERAL="COLLATERAL")
             result = poly.get_balance()
         finally:
             polymarket_module.V2_CLOB_CLIENT = original_flag
+            polymarket_module.BalanceAllowanceParams = original_params
+            polymarket_module.AssetType = original_asset_type
 
         self.assertEqual(result["balance"], "1000000")
+        self.assertEqual(calls["params"].asset_type, "COLLATERAL")
+
+    def test_v2_open_orders_use_get_open_orders(self):
+        poly = PolyMarketAPI.__new__(PolyMarketAPI)
+        calls = {"params": None}
+
+        class FakeOpenOrderParams:
+            pass
+
+        class OpenOrdersClient:
+            def get_open_orders(self, params):
+                calls["params"] = params
+                return [{"id": "ord-1"}]
+
+        poly.client = OpenOrdersClient()
+        original_params = polymarket_module.OpenOrderParams
+        try:
+            polymarket_module.OpenOrderParams = FakeOpenOrderParams
+            result = poly.get_open_orders()
+        finally:
+            polymarket_module.OpenOrderParams = original_params
+
+        self.assertEqual(result, [{"id": "ord-1"}])
+        self.assertIsInstance(calls["params"], FakeOpenOrderParams)
 
     def test_v2_limit_orders_use_gtc_submission(self):
         poly = PolyMarketAPI.__new__(PolyMarketAPI)

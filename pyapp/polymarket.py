@@ -17,8 +17,11 @@ from .relayer import RelayClient, build_builder_config_from_env
 try:
     from py_clob_client_v2 import (
         ApiCreds,
+        AssetType,
+        BalanceAllowanceParams,
         ClobClient,
         MarketOrderArgs,
+        OpenOrderParams,
         OrderArgs,
         OrderType,
         PartialCreateOrderOptions,
@@ -28,7 +31,6 @@ try:
         from py_clob_client_v2.order_builder.constants import COLLATERAL as COLLATERAL_ASSET_TYPE
     except ImportError:
         COLLATERAL_ASSET_TYPE = "COLLATERAL"
-    BalanceAllowanceParams = None
     V2_CLOB_CLIENT = True
 except ImportError:
     from py_clob_client.client import ClobClient
@@ -39,6 +41,7 @@ except ImportError:
         MarketOrderArgs,
         OrderArgs,
         OrderType,
+        OpenOrderParams,
         PartialCreateOrderOptions,
     )
     Side = None
@@ -254,10 +257,8 @@ class PolyMarketAPI:
         for attempt in range(1, retries + 1):
             try:
                 if V2_CLOB_CLIENT:
-                    try:
-                        return _to_plain(self.client.get_balance_allowance(COLLATERAL_ASSET_TYPE))
-                    except TypeError:
-                        return _to_plain(self.client.get_balance_allowance())
+                    params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                    return _to_plain(self.client.get_balance_allowance(params))
                 params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
                 self.client.update_balance_allowance(params)
                 return _to_plain(self.client.get_balance_allowance(params))
@@ -444,6 +445,8 @@ class PolyMarketAPI:
     def get_open_orders(self):
         if not self.client:
             raise ValueError("Client not initialized")
+        if hasattr(self.client, "get_open_orders"):
+            return _to_plain(self.client.get_open_orders(OpenOrderParams()))
         return _to_plain(self.client.get_orders())
 
     def _require_v2_order_client(self):
