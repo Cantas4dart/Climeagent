@@ -14,6 +14,7 @@ from .polymarket import PolyMarketAPI, extract_allowance_amount
 from .singleton import acquire_process_lock
 
 MIN_TRADE_NOTIONAL_USD = 1.0
+MIN_LIMIT_ORDER_SIZE_SHARES = 5.0
 SHARE_SIZE_PRECISION = 6
 
 
@@ -136,7 +137,7 @@ class TradeExecutor:
                 if target_usd < MIN_TRADE_NOTIONAL_USD and spendable_balance >= MIN_TRADE_NOTIONAL_USD and max_trade_amount >= MIN_TRADE_NOTIONAL_USD:
                     target_usd = MIN_TRADE_NOTIONAL_USD
                 size = round(target_usd / entry_price, SHARE_SIZE_PRECISION) if entry_price > 0 else 0.0
-                reserved_cost = size * entry_price
+                reserved_cost = target_usd
                 if target_usd < MIN_TRADE_NOTIONAL_USD or size <= 0:
                     print(
                         f"[PYEXEC] Balance too low to place trade for {user.tg_id} "
@@ -179,7 +180,14 @@ class TradeExecutor:
                     continue
 
                 try:
-                    order_response = poly.place_limit_order(token_id, "BUY", entry_price, size)
+                    if size < MIN_LIMIT_ORDER_SIZE_SHARES:
+                        print(
+                            f"[PYEXEC] Size {size:.6f} is below Polymarket limit-order minimum "
+                            f"({MIN_LIMIT_ORDER_SIZE_SHARES:g} shares). Using market buy for ${target_usd:.2f}."
+                        )
+                        order_response = poly.place_market_order(token_id, "BUY", target_usd)
+                    else:
+                        order_response = poly.place_limit_order(token_id, "BUY", entry_price, size)
                     order_id = str(order_response.get("orderID")) if order_response.get("orderID") is not None else None
                     self.db.mark_trade_submitted(user.tg_id, market_id, order_id)
                     self.send_trade_alert(user.tg_id, signal, side, entry_price, size, order_response)

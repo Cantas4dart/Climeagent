@@ -236,9 +236,9 @@ class ExecutorLiveBehaviorTests(unittest.TestCase):
 
         self.assertEqual(reserved["count"], 1)
 
-    def test_executor_uses_trade_amount_with_fractional_shares(self):
+    def test_executor_uses_market_buy_for_small_fractional_shares(self):
         executor = TradeExecutor.__new__(TradeExecutor)
-        recorded = {"reserved": None, "order": None}
+        recorded = {"reserved": None, "limit_order": None, "market_order": None}
 
         executor.db = SimpleNamespace(
             get_unsettled_trade_count=lambda tg_id: 0,
@@ -251,13 +251,18 @@ class ExecutorLiveBehaviorTests(unittest.TestCase):
         executor.send_trade_alert = lambda *args, **kwargs: None
 
         def place_limit_order(token_id, side, price, size):
-            recorded["order"] = (token_id, side, price, size)
+            recorded["limit_order"] = (token_id, side, price, size)
             return {"orderID": "ord-3", "status": "live"}
+
+        def place_market_order(token_id, side, amount):
+            recorded["market_order"] = (token_id, side, amount)
+            return {"orderID": "ord-3", "status": "matched"}
 
         poly = SimpleNamespace(
             get_balance=lambda: {"balance": "4900000", "allowance": "100000000"},
             get_market_by_id=lambda market_id: {"clobTokenIds": "[\"yes-token\", \"no-token\"]"},
             place_limit_order=place_limit_order,
+            place_market_order=place_market_order,
         )
         executor.build_poly_client = lambda user, account_config: poly
 
@@ -285,12 +290,12 @@ class ExecutorLiveBehaviorTests(unittest.TestCase):
         executor.process_real_user_signals(user, signals)
 
         self.assertAlmostEqual(recorded["reserved"]["size"], 1.177856, places=6)
-        self.assertEqual(recorded["order"][0], "no-token")
-        self.assertAlmostEqual(recorded["order"][3], 1.177856, places=6)
+        self.assertIsNone(recorded["limit_order"])
+        self.assertEqual(recorded["market_order"], ("no-token", "BUY", 1.0))
 
-    def test_executor_sizes_shares_from_configured_dollar_amount(self):
+    def test_executor_uses_market_buy_when_configured_dollar_amount_is_under_limit_minimum(self):
         executor = TradeExecutor.__new__(TradeExecutor)
-        recorded = {"order": None}
+        recorded = {"limit_order": None, "market_order": None}
 
         executor.db = SimpleNamespace(
             get_unsettled_trade_count=lambda tg_id: 0,
@@ -303,13 +308,18 @@ class ExecutorLiveBehaviorTests(unittest.TestCase):
         executor.send_trade_alert = lambda *args, **kwargs: None
 
         def place_limit_order(token_id, side, price, size):
-            recorded["order"] = (token_id, side, price, size)
+            recorded["limit_order"] = (token_id, side, price, size)
             return {"orderID": "ord-4", "status": "live"}
+
+        def place_market_order(token_id, side, amount):
+            recorded["market_order"] = (token_id, side, amount)
+            return {"orderID": "ord-4", "status": "matched"}
 
         poly = SimpleNamespace(
             get_balance=lambda: {"balance": "10000000", "allowance": "100000000"},
             get_market_by_id=lambda market_id: {"clobTokenIds": "[\"yes-token\", \"no-token\"]"},
             place_limit_order=place_limit_order,
+            place_market_order=place_market_order,
         )
         executor.build_poly_client = lambda user, account_config: poly
 
@@ -336,8 +346,8 @@ class ExecutorLiveBehaviorTests(unittest.TestCase):
 
         executor.process_real_user_signals(user, signals)
 
-        self.assertEqual(recorded["order"][0], "yes-token")
-        self.assertAlmostEqual(recorded["order"][3], 1.851852, places=6)
+        self.assertIsNone(recorded["limit_order"])
+        self.assertEqual(recorded["market_order"], ("yes-token", "BUY", 1.0))
 
 
 class SettlementLiveBehaviorTests(unittest.TestCase):
