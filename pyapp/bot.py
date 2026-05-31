@@ -104,6 +104,11 @@ def format_position_summary(position: dict[str, Any]) -> str:
     return f"- {asset}: {size} @ {avg_price}"
 
 
+def format_trade_position_summary(trade: Trade) -> str:
+    size = float(trade.remaining_size or trade.size or 0.0)
+    return f"- Market {trade.market_id}: {size:.4f} {trade.side} @ {float(trade.buy_price or 0.0):.4f}"
+
+
 def format_order_summary(order: dict[str, Any]) -> str:
     label = order.get("outcome") or order.get("asset_id") or order.get("market") or "Order"
     size = order.get("original_size") or order.get("size") or "?"
@@ -657,13 +662,123 @@ class TelegramPollingBot:
             return None
         return None
 
-    def _is_active_live_position(self, position: dict[str, Any]) -> bool:
+    @staticmethod
+    def _position_key(position: dict[str, Any]) -> tuple[str, str] | None:
+        condition_id = str(position.get("conditionId") or "").strip().lower()
+        outcome = str(position.get("outcome") or "").strip().upper()
+        if not condition_id or outcome not in {"YES", "NO"}:
+            return None
+        return condition_id, outcome
+
+    @staticmethod
+    def _trade_key(trade: Trade) -> tuple[str, str] | None:
+        condition_id = str(trade.condition_id or "").strip().lower()
+        side = str(trade.side or "").strip().upper()
+        if not condition_id or side not in {"YES", "NO"}:
+            return None
+        return condition_id, side
+
+    @staticmethod
+    def _market_accepts_orders(market: dict[str, Any] | None) -> bool:
+        if not market:
+            return True
+        for key in ("closed", "archived"):
+            if market.get(key) is True:
+                return False
+        for key in ("active", "acceptingOrders"):
+            if market.get(key) is False:
+                return False
+        return True
+
+    def _is_active_live_position(self, position: dict[str, Any], market: dict[str, Any] | None = None) -> bool:
         if self._position_size(position) <= 0.01:
             return False
-        end_time = self._position_end_time(position)
-        if end_time and end_time <= datetime.now(timezone.utc):
+        if position.get("redeemable") is True or position.get("claimable") is True:
+            return False
+        if not self._market_accepts_orders(market):
             return False
         return True
+
+    def _get_position_market(
+        self,
+        poly: PolyMarketAPI,
+        position: dict[str, Any],
+        market_cache: dict[str, dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
+        condition_id = str(position.get("conditionId") or "").strip()
+        if not condition_id:
+            return None
+        if condition_id not in market_cache:
+            try:
+                market_cache[condition_id] = poly.get_market_by_condition_id(condition_id)
+            except Exception as exc:
+                print(f"[BOT] Could not map condition {condition_id} to a market during live position check: {exc}")
+                market_cache[condition_id] = None
+        return market_cache[condition_id]
+
+    def get_active_live_positions(
+        self,
+        poly: PolyMarketAPI,
+        positions: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        market_cache: dict[str, dict[str, Any] | None] = {}
+        active_positions = []
+        for position in positions or []:
+            market = self._get_position_market(poly, position, market_cache)
+            if self._is_active_live_position(position, market):
+                active_positions.append(position)
+        return active_positions
+
+    def get_pending_db_positions(
+        self,
+        user_id: str,
+        poly: PolyMarketAPI,
+        live_positions: list[dict[str, Any]],
+        market_cache: dict[str, dict[str, Any] | None] | None = None,
+    ) -> list[Trade]:
+        live_keys = {key for key in (self._position_key(position) for position in live_positions) if key}
+        pending_positions = []
+        market_cache = market_cache or {}
+        for trade in self.db.get_trades_for_user(user_id):
+            if trade.settled or trade.position_closed or float(trade.remaining_size or trade.size or 0.0) <= 0:
+                continue
+            trade_key = self._trade_key(trade)
+            if trade_key and trade_key in live_keys:
+                continue
+            market_key = str(trade.market_id or trade.condition_id or "")
+            if market_key not in market_cache:
+                try:
+                    market_cache[market_key] = poly.get_market_by_id(str(trade.market_id)) if trade.market_id else None
+                except Exception:
+                    market_cache[market_key] = None
+            if self._market_accepts_orders(market_cache.get(market_key)):
+                pending_positions.append(trade)
+        return pending_positions
+
+    def get_live_claimable_trades(self, user_id: str, user: User, poly: PolyMarketAPI | None = None) -> list[Trade]:
+        claimable_trades = self.db.get_claimable_trades(user_id)
+        if not claimable_trades or not has_imported_wallet(user):
+            return claimable_trades
+        account_config = resolve_user_polymarket_account_config(user)
+        poly = poly or PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, account_config)
+        positions_address = account_config["funderAddress"] or poly.get_signer_address()
+        try:
+            positions = poly.get_positions(positions_address) or []
+        except Exception as exc:
+            print(f"[BOT] Live claimable check failed for {user_id}: {exc}")
+            return claimable_trades
+        redeemable_conditions = {
+            str(position.get("conditionId") or "").strip().lower()
+            for position in positions
+            if (position.get("redeemable") is True or position.get("claimable") is True)
+        }
+        if not redeemable_conditions:
+            return []
+        return [
+            trade
+            for trade in claimable_trades
+            if str(trade.condition_id or "").strip().lower() in redeemable_conditions
+        ]
 
     def sync_live_positions_to_db(
         self,
@@ -687,7 +802,8 @@ class TelegramPollingBot:
         market_cache: dict[str, dict[str, Any] | None] = {}
 
         for position in positions:
-            if not self._is_active_live_position(position):
+            market = self._get_position_market(poly, position, market_cache)
+            if not self._is_active_live_position(position, market):
                 continue
 
             raw_outcome = str(position.get("outcome") or "").strip().upper()
@@ -697,13 +813,6 @@ class TelegramPollingBot:
             condition_id = str(position.get("conditionId") or "").strip()
             if not condition_id:
                 continue
-
-            if condition_id not in market_cache:
-                try:
-                    market_cache[condition_id] = poly.get_market_by_condition_id(condition_id)
-                except Exception as exc:
-                    print(f"[BOT] Could not map condition {condition_id} to a market id during sync: {exc}")
-                    market_cache[condition_id] = None
 
             market = market_cache[condition_id] or {}
             market_id = str(market.get("id") or condition_id)
@@ -901,12 +1010,14 @@ class TelegramPollingBot:
             tracked_open_positions = self.db.get_unsettled_trade_count(user_id)
         positions = poly.get_positions(positions_address)
         open_orders = poly.get_open_orders()
-        live_positions = [position for position in positions if self._is_active_live_position(position)]
+        live_positions = self.get_active_live_positions(poly, positions)
+        pending_positions = self.get_pending_db_positions(user_id, poly, live_positions)
+        open_position_count = len(live_positions) + len(pending_positions)
         lines = [
             "Live Trading Center",
             "",
             "Overview",
-            format_key_value("Open Positions", len(live_positions)),
+            format_key_value("Open Positions", open_position_count),
             format_key_value("Working Orders", len(open_orders or [])),
             format_key_value("Claimable", len(claimable_trades)),
             format_key_value("Auto-Claim", "ON" if user.auto_claim else "OFF"),
@@ -928,14 +1039,22 @@ class TelegramPollingBot:
         account_config = resolve_user_polymarket_account_config(user)
         poly = PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, account_config)
         positions_address = account_config["funderAddress"] or poly.get_signer_address()
-        positions = [position for position in poly.get_positions(positions_address) if self._is_active_live_position(position)]
-        lines = ["Active Positions", "", format_key_value("Count", len(positions))]
+        positions = self.get_active_live_positions(poly, poly.get_positions(positions_address))
+        pending_positions = self.get_pending_db_positions(str(user.tg_id), poly, positions)
+        lines = ["Active Positions", "", format_key_value("Count", len(positions) + len(pending_positions))]
         if positions:
             lines.append("")
             for position in positions:
                 lines.append(format_position_summary(position))
+        if pending_positions:
+            if not positions:
+                lines.append("")
+            lines.append("Submitted Positions")
+            for trade in pending_positions:
+                lines.append(format_trade_position_summary(trade))
         else:
-            lines.extend(["", "No active live positions right now."])
+            if not positions:
+                lines.extend(["", "No active live positions right now."])
         return {"text": wrap_code_block(lines), "keyboard": build_positions_keyboard(bool(user.auto_claim), False)}
 
     def build_active_orders_page(self, user: User) -> dict[str, Any]:
@@ -970,7 +1089,7 @@ class TelegramPollingBot:
         return {"text": wrap_code_block(lines), "keyboard": build_positions_keyboard(bool(user.auto_claim), False)}
 
     def render_dashboard_page(self, user_id: str, user: User | None, page: str, notice: str | None = None) -> dict[str, Any]:
-        claimable_trades = self.db.get_claimable_trades(user_id) if user else []
+        claimable_trades = self.get_live_claimable_trades(user_id, user) if user else []
         auto_claim = bool(user.auto_claim) if user else False
         has_claimables = len(claimable_trades) > 0
         if not user:
@@ -978,7 +1097,7 @@ class TelegramPollingBot:
         if (
             not user.paper_testing_active
             and has_imported_wallet(user)
-            and page in {"refresh", "main", "stats", "history", "orders"}
+            and page in {"refresh", "main", "stats", "history", "orders", "active_positions", "claimable"}
         ):
             try:
                 self.sync_live_positions_to_db(user_id, user)
@@ -1045,10 +1164,10 @@ class TelegramPollingBot:
         return self.render_dashboard_page(user_id, user, "main", notice)
 
     def claim_trade_by_id_for_user(self, user_id: str, user: User, trade_id: int) -> str:
-        claimable_trades = self.db.get_claimable_trades(user_id)
+        claimable_trades = self.get_live_claimable_trades(user_id, user)
         trade = next((item for item in claimable_trades if int(item.id) == trade_id), None)
         if not trade:
-            raise ValueError("No settled winning trade is waiting to be claimed for that selection.")
+            raise ValueError("No live redeemable winning trade is waiting to be claimed for that selection.")
         if not trade.condition_id:
             raise ValueError("This trade is missing a condition id, so the bot cannot redeem it automatically.")
         poly = PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, resolve_user_polymarket_account_config(user))
@@ -1059,9 +1178,9 @@ class TelegramPollingBot:
         return f"https://polygonscan.com/tx/{tx_hash}{self.format_platform_fee_note(fee_result)}"
 
     def claim_all_for_user(self, user_id: str, user: User) -> str:
-        claimable_trades = self.db.get_claimable_trades(user_id)
+        claimable_trades = self.get_live_claimable_trades(user_id, user)
         if not claimable_trades:
-            return "No settled winning trades are waiting to be claimed."
+            return "No live redeemable winning trades are waiting to be claimed."
         unique_conditions = {}
         for trade in claimable_trades:
             if trade.condition_id and trade.condition_id not in unique_conditions:
@@ -1253,8 +1372,8 @@ class TelegramPollingBot:
             if not user:
                 self.send_message(chat_id, "Use /import first.")
             else:
-                claimable_trades = self.db.get_claimable_trades(user_id)
-                self.send_message(chat_id, "No settled winning trades are waiting to be claimed." if not claimable_trades else self.build_claimable_message(claimable_trades), build_claimable_keyboard(claimable_trades, bool(user.auto_claim)) if claimable_trades else None)
+                claimable_trades = self.get_live_claimable_trades(user_id, user)
+                self.send_message(chat_id, "No live redeemable winning trades are waiting to be claimed." if not claimable_trades else self.build_claimable_message(claimable_trades), build_claimable_keyboard(claimable_trades, bool(user.auto_claim)) if claimable_trades else None)
             return
         for known_command, handler in {
             "/auto_claim_on": lambda: (self.db.update_auto_claim(user_id, True), self.send_message(chat_id, "Auto-claim enabled. Winning settled trades will be redeemed automatically when possible.")),
@@ -1336,9 +1455,13 @@ class TelegramPollingBot:
                 if not user:
                     self.send_message(chat_id, "Use /import first.")
                     return
-                claimable = self.db.get_claimable_trades_for_market(user_id, arg)
+                claimable = [
+                    trade
+                    for trade in self.get_live_claimable_trades(user_id, user)
+                    if str(trade.market_id or "") == str(arg)
+                ]
                 if not claimable:
-                    self.send_message(chat_id, "No settled winning trade is waiting to be claimed for that market.")
+                    self.send_message(chat_id, "No live redeemable winning trade is waiting to be claimed for that market.")
                     return
                 trade = claimable[0]
                 if not trade.condition_id:
