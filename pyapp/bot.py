@@ -643,6 +643,28 @@ class TelegramPollingBot:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _position_end_time(position: dict[str, Any]) -> datetime | None:
+        raw_value = position.get("endDate") or position.get("end_date") or position.get("endDateIso")
+        if not raw_value:
+            return None
+        try:
+            if isinstance(raw_value, str):
+                normalized = raw_value.replace("Z", "+00:00")
+                parsed = datetime.fromisoformat(normalized)
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        return None
+
+    def _is_active_live_position(self, position: dict[str, Any]) -> bool:
+        if self._position_size(position) <= 0.01:
+            return False
+        end_time = self._position_end_time(position)
+        if end_time and end_time <= datetime.now(timezone.utc):
+            return False
+        return True
+
     def sync_live_positions_to_db(
         self,
         user_id: str,
@@ -665,7 +687,7 @@ class TelegramPollingBot:
         market_cache: dict[str, dict[str, Any] | None] = {}
 
         for position in positions:
-            if self._position_size(position) <= 0.01:
+            if not self._is_active_live_position(position):
                 continue
 
             raw_outcome = str(position.get("outcome") or "").strip().upper()
@@ -879,7 +901,7 @@ class TelegramPollingBot:
             tracked_open_positions = self.db.get_unsettled_trade_count(user_id)
         positions = poly.get_positions(positions_address)
         open_orders = poly.get_open_orders()
-        live_positions = [position for position in positions if self._position_size(position) > 0.01]
+        live_positions = [position for position in positions if self._is_active_live_position(position)]
         lines = [
             "Live Trading Center",
             "",
@@ -894,10 +916,6 @@ class TelegramPollingBot:
         ]
         if synced_manual_positions > 0:
             lines.extend(["", f"Synced {synced_manual_positions} manual live position(s) into dashboard tracking."])
-        if tracked_open_positions != len(live_positions):
-            lines.extend(["", format_key_value("Tracked DB", tracked_open_positions), "Live positions are the source of truth for this dashboard."])
-        if live_positions:
-            lines.extend(["", "Positions", "Use the Positions button to view all active positions."])
         if open_orders:
             lines.extend(["", "Working Orders"])
             for order in open_orders[:6]:
@@ -910,7 +928,7 @@ class TelegramPollingBot:
         account_config = resolve_user_polymarket_account_config(user)
         poly = PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, account_config)
         positions_address = account_config["funderAddress"] or poly.get_signer_address()
-        positions = [position for position in poly.get_positions(positions_address) if self._position_size(position) > 0.01]
+        positions = [position for position in poly.get_positions(positions_address) if self._is_active_live_position(position)]
         lines = ["Active Positions", "", format_key_value("Count", len(positions))]
         if positions:
             lines.append("")
@@ -1476,7 +1494,7 @@ class TelegramPollingBot:
                     print(f"[BOT] Report Error ({action}): {exc}")
                     safe_answer(callback_query.get("id"), f"{action.replace('_', '-').title()} report failed.", True)
                 return
-            if action in {"claimable", "balance", "status", "stats", "controls", "risk_settings", "wallet_check", "orders", "history", "reports", "report_daily", "report_weekly", "report_alltime"}:
+            if action in {"claimable", "balance", "status", "stats", "controls", "risk_settings", "wallet_check", "active_positions", "orders", "history", "reports", "report_daily", "report_weekly", "report_alltime"}:
                 if action in {"balance", "wallet_check"} and not has_imported_wallet(user):
                     safe_answer(callback_query.get("id"), "Import a live wallet for that action.", True)
                     return
