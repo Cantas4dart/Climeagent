@@ -238,6 +238,19 @@ def get_utc_date_key_with_offset(days_offset: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(days=days_offset)).strftime("%Y-%m-%d")
 
 
+def parse_db_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        try:
+            return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+
 def format_report_date(date_key: str) -> str:
     return datetime.strptime(date_key, "%Y-%m-%d").strftime("%B %-d") if os.name != "nt" else datetime.strptime(date_key, "%Y-%m-%d").strftime("%B %#d")
 
@@ -695,8 +708,6 @@ class TelegramPollingBot:
             return False
         if position.get("redeemable") is True or position.get("claimable") is True:
             return False
-        if not self._market_accepts_orders(market):
-            return False
         return True
 
     def _get_position_market(
@@ -721,11 +732,9 @@ class TelegramPollingBot:
         poly: PolyMarketAPI,
         positions: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        market_cache: dict[str, dict[str, Any] | None] = {}
         active_positions = []
         for position in positions or []:
-            market = self._get_position_market(poly, position, market_cache)
-            if self._is_active_live_position(position, market):
+            if self._is_active_live_position(position):
                 active_positions.append(position)
         return active_positions
 
@@ -739,8 +748,14 @@ class TelegramPollingBot:
         live_keys = {key for key in (self._position_key(position) for position in live_positions) if key}
         pending_positions = []
         market_cache = market_cache or {}
+        now = datetime.now(timezone.utc)
         for trade in self.db.get_trades_for_user(user_id):
             if trade.settled or trade.position_closed or float(trade.remaining_size or trade.size or 0.0) <= 0:
+                continue
+            if str(trade.execution_status or "") not in {"placing", "submitted"}:
+                continue
+            trade_timestamp = parse_db_timestamp(trade.timestamp)
+            if not trade_timestamp or now - trade_timestamp > timedelta(minutes=30):
                 continue
             trade_key = self._trade_key(trade)
             if trade_key and trade_key in live_keys:
@@ -758,7 +773,7 @@ class TelegramPollingBot:
     def get_live_claimable_trades(self, user_id: str, user: User, poly: PolyMarketAPI | None = None) -> list[Trade]:
         claimable_trades = self.db.get_claimable_trades(user_id)
         if not claimable_trades or not has_imported_wallet(user):
-            return claimable_trades
+            return []
         account_config = resolve_user_polymarket_account_config(user)
         poly = poly or PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, account_config)
         positions_address = account_config["funderAddress"] or poly.get_signer_address()
@@ -766,11 +781,15 @@ class TelegramPollingBot:
             positions = poly.get_positions(positions_address) or []
         except Exception as exc:
             print(f"[BOT] Live claimable check failed for {user_id}: {exc}")
-            return claimable_trades
+            return []
         redeemable_conditions = {
             str(position.get("conditionId") or "").strip().lower()
             for position in positions
-            if (position.get("redeemable") is True or position.get("claimable") is True)
+            if (
+                str(position.get("conditionId") or "").strip()
+                and self._position_size(position) > 0.01
+                and (position.get("redeemable") is True or position.get("claimable") is True)
+            )
         }
         if not redeemable_conditions:
             return []
@@ -974,7 +993,7 @@ class TelegramPollingBot:
 
     def build_positions_dashboard(self, user_id: str, user: User) -> dict[str, Any]:
         tracked_open_positions = self.db.get_unsettled_trade_count(user_id)
-        claimable_trades = self.db.get_claimable_trades(user_id)
+        claimable_trades = self.get_live_claimable_trades(user_id, user) if has_imported_wallet(user) else []
         paper_stats = self.db.get_paper_stats(user_id)
         if user.paper_testing_active:
             paper_all = self.db.get_paper_trades_for_user(user_id)
