@@ -16,6 +16,8 @@ from .singleton import acquire_process_lock
 MIN_TRADE_NOTIONAL_USD = 1.0
 MIN_LIMIT_ORDER_SIZE_SHARES = 5.0
 SHARE_SIZE_PRECISION = 6
+SELL_SIZE_STEP = 0.01
+MIN_SELL_SIZE_SHARES = 0.01
 
 
 def extract_allowance(balance_data: dict[str, Any]) -> float:
@@ -318,14 +320,32 @@ class TradeExecutor:
                 market_data = poly.get_market_by_id(str(trade.market_id))
                 clob_token_ids = json.loads(market_data.get("clobTokenIds") or "[]")
                 token_id = clob_token_ids[0] if trade.side == "YES" else clob_token_ids[1]
+                live_size = self.get_live_token_position_size(poly, user, token_id, trade)
+                if live_size <= 0.01:
+                    self.db.record_trade_exit(trade.id, 0.0, None, "no live token balance", True)
+                    print(
+                        f"[PYEXEC] Marked {trade.market_id} closed for {trade.tg_id}: "
+                        f"no live {trade.side} token balance found."
+                    )
+                    continue
+                shares_to_sell = min(shares_to_sell, live_size)
+                shares_to_sell = self.floor_sell_size(shares_to_sell)
+                if shares_to_sell < MIN_SELL_SIZE_SHARES:
+                    print(
+                        f"[PYEXEC] Auto-exit skipped for {trade.tg_id} / {trade.market_id}: "
+                        f"live balance {live_size:.6f} is below sellable precision."
+                    )
+                    continue
                 order_response = poly.place_market_order(token_id, "SELL", shares_to_sell)
-                new_remaining_size = max(0.0, round(remaining_size - shares_to_sell, SHARE_SIZE_PRECISION))
+                new_remaining_size = max(0.0, round(min(remaining_size, live_size) - shares_to_sell, SHARE_SIZE_PRECISION))
                 exit_price = (
                     float(state.get("market_price_yes", trade.buy_price or 0))
                     if trade.side == "YES"
                     else float(state.get("market_price_no", trade.buy_price or 0))
                 )
-                fully_closed = new_remaining_size <= 0
+                fully_closed = new_remaining_size <= MIN_SELL_SIZE_SHARES
+                if fully_closed:
+                    new_remaining_size = 0.0
                 self.db.record_trade_exit(trade.id, new_remaining_size, exit_price, assessment["reason"], fully_closed)
                 self.send_exit_alert(
                     trade.tg_id,
@@ -342,6 +362,51 @@ class TradeExecutor:
                 )
             except Exception as exc:
                 print(f"[PYEXEC ERROR] Auto-exit failed for {trade.tg_id} / {trade.market_id}: {exc}")
+
+    @staticmethod
+    def floor_sell_size(size: float) -> float:
+        return round(int(max(0.0, size) / SELL_SIZE_STEP) * SELL_SIZE_STEP, 3)
+
+    def get_live_token_position_size(
+        self,
+        poly: PolyMarketAPI,
+        user: User,
+        token_id: str,
+        trade: Any,
+    ) -> float:
+        account_config = resolve_user_polymarket_account_config(user)
+        positions_address = account_config["funderAddress"] or poly.get_signer_address()
+        positions = poly.get_positions(positions_address) or []
+        trade_condition_id = str(trade.condition_id or "").lower()
+        trade_side = str(trade.side or "").upper()
+        token_id = str(token_id)
+
+        for position in positions:
+            position_token_id = str(
+                position.get("asset")
+                or position.get("asset_id")
+                or position.get("assetId")
+                or position.get("token_id")
+                or position.get("tokenId")
+                or position.get("clobTokenId")
+                or ""
+            )
+            position_condition_id = str(position.get("conditionId") or "").lower()
+            position_outcome = str(position.get("outcome") or "").upper()
+            token_matches = position_token_id == token_id
+            condition_matches = (
+                trade_condition_id
+                and position_condition_id == trade_condition_id
+                and position_outcome == trade_side
+            )
+            if not token_matches and not condition_matches:
+                continue
+            try:
+                return float(position.get("size") or position.get("balance") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        return 0.0
 
     def build_poly_client(self, user: User, account_config: dict[str, Any]) -> PolyMarketAPI:
         return PolyMarketAPI(

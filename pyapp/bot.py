@@ -138,7 +138,8 @@ def build_positions_keyboard(auto_claim: bool, has_claimables: bool) -> dict[str
         [
             [("🏠 Home", "positions:main"), ("🔄 Refresh", "positions:refresh")],
             [("🏆 Claimable", "positions:claimable"), ("⚙️ Setup", "positions:setup")],
-            [("📋 Orders", "positions:orders"), ("📜 History", "positions:history")],
+            [("📍 Positions", "positions:active_positions"), ("📋 Orders", "positions:orders")],
+            [("📜 History", "positions:history")],
             [("💰 Balance", "positions:balance"), ("📈 Status", "positions:status")],
             [("📊 Stats", "positions:stats"), ("📅 Daily", "positions:daily"), ("📆 Weekly", "positions:weekly")],
             [("📊 All Time", "positions:all_time")],
@@ -878,12 +879,12 @@ class TelegramPollingBot:
             tracked_open_positions = self.db.get_unsettled_trade_count(user_id)
         positions = poly.get_positions(positions_address)
         open_orders = poly.get_open_orders()
-        live_open_positions = len([position for position in positions if self._position_size(position) > 0.01])
+        live_positions = [position for position in positions if self._position_size(position) > 0.01]
         lines = [
             "Live Trading Center",
             "",
             "Overview",
-            format_key_value("Open Positions", max(tracked_open_positions, live_open_positions)),
+            format_key_value("Open Positions", len(live_positions)),
             format_key_value("Working Orders", len(open_orders or [])),
             format_key_value("Claimable", len(claimable_trades)),
             format_key_value("Auto-Claim", "ON" if user.auto_claim else "OFF"),
@@ -893,15 +894,31 @@ class TelegramPollingBot:
         ]
         if synced_manual_positions > 0:
             lines.extend(["", f"Synced {synced_manual_positions} manual live position(s) into dashboard tracking."])
-        if positions:
-            lines.extend(["", "Positions"])
-            for position in positions[:6]:
-                lines.append(format_position_summary(position))
+        if tracked_open_positions != len(live_positions):
+            lines.extend(["", format_key_value("Tracked DB", tracked_open_positions), "Live positions are the source of truth for this dashboard."])
+        if live_positions:
+            lines.extend(["", "Positions", "Use the Positions button to view all active positions."])
         if open_orders:
             lines.extend(["", "Working Orders"])
             for order in open_orders[:6]:
                 lines.append(format_order_summary(order))
         return {"text": wrap_code_block(lines), "keyboard": build_positions_keyboard(bool(user.auto_claim), len(claimable_trades) > 0)}
+
+    def build_active_positions_page(self, user: User) -> dict[str, Any]:
+        if not has_imported_wallet(user):
+            return {"text": wrap_code_block(["Active Positions", "", "Import a live wallet first to view active positions."]), "keyboard": build_positions_keyboard(bool(user.auto_claim), False)}
+        account_config = resolve_user_polymarket_account_config(user)
+        poly = PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, account_config)
+        positions_address = account_config["funderAddress"] or poly.get_signer_address()
+        positions = [position for position in poly.get_positions(positions_address) if self._position_size(position) > 0.01]
+        lines = ["Active Positions", "", format_key_value("Count", len(positions))]
+        if positions:
+            lines.append("")
+            for position in positions:
+                lines.append(format_position_summary(position))
+        else:
+            lines.extend(["", "No active live positions right now."])
+        return {"text": wrap_code_block(lines), "keyboard": build_positions_keyboard(bool(user.auto_claim), False)}
 
     def build_active_orders_page(self, user: User) -> dict[str, Any]:
         if not has_imported_wallet(user):
@@ -954,6 +971,9 @@ class TelegramPollingBot:
         if page in {"refresh", "main"}:
             dashboard = self.build_positions_dashboard(user_id, user)
             return {"text": self.with_dashboard_notice(dashboard["text"], notice), "keyboard": dashboard["keyboard"]}
+        if page == "active_positions":
+            view = self.build_active_positions_page(user)
+            return {"text": self.with_dashboard_notice(view["text"], notice), "keyboard": view["keyboard"]}
         if page == "orders":
             view = self.build_active_orders_page(user)
             return {"text": self.with_dashboard_notice(view["text"], notice), "keyboard": view["keyboard"]}
