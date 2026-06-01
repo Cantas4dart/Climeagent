@@ -241,6 +241,16 @@ class SignalTimingGateTests(unittest.TestCase):
         self.assertFalse(generator._are_market_prices_within_cap(0.8501, 0.1499))
         self.assertFalse(generator._are_market_prices_within_cap(0.1499, 0.8501))
 
+    def test_forecast_source_gate_requires_three_sources(self):
+        generator = SignalGenerator()
+
+        blocked = generator._forecast_source_gate({"noaa": 82.0})
+        allowed = generator._forecast_source_gate({"noaa": 82.0, "hrrr": 81.8, "gfs": 82.3})
+
+        self.assertTrue(blocked["blocked"])
+        self.assertIn("minimum 3", blocked["reason"])
+        self.assertFalse(allowed["blocked"])
+
 
 if __name__ == "__main__":
     unittest.main()

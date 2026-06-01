@@ -18,6 +18,7 @@ except ImportError:
     from console import safe_print
 DEGREE_OPTIONAL_PATTERN = f"(?:{chr(176)}\\s*)?"
 MAX_SIGNAL_ENTRY_PRICE = 0.85
+MIN_FORECAST_SOURCE_COUNT = 3
 
 
 
@@ -229,6 +230,12 @@ class SignalGenerator:
                     forecast_data = self.extract_predicted_temps(forecast, is_us, market_date)
                     if not forecast_data:
                         self.log(f"[SIGNAL] | >> SKIP: No forecast temperatures available for market date.")
+                        skipped["no_forecast"] += 1
+                        self.log(f"[SIGNAL] +------------------------------------------")
+                        continue
+                    source_gate = self._forecast_source_gate(forecast_data)
+                    if source_gate["blocked"]:
+                        self.log(f"[SIGNAL] | >> SKIP: {source_gate['reason']}")
                         skipped["no_forecast"] += 1
                         self.log(f"[SIGNAL] +------------------------------------------")
                         continue
@@ -1202,6 +1209,7 @@ class SignalGenerator:
             "forecast_avg": round(avg_forecast, 4),
             "forecast_min": round(forecast_min, 4),
             "forecast_max": round(forecast_max, 4),
+            "forecast_data": forecast_data,
             "exact_rounding_consensus": exact_rounding_consensus,
             "exact_rounding_protected": exact_rounding_protected,
             "exact_target_distance": round(exact_target_distance, 4) if exact_target_distance is not None else None,
@@ -1502,6 +1510,18 @@ class SignalGenerator:
             return {
                 "blocked": True,
                 "reason": f"U.S. same-day entries wait until 8:00 AM local time ({timezone_name}) for forecast stability.",
+            }
+        return {"blocked": False, "reason": ""}
+
+    def _forecast_source_gate(self, forecast_data):
+        source_count = len(forecast_data or {})
+        if source_count < MIN_FORECAST_SOURCE_COUNT:
+            return {
+                "blocked": True,
+                "reason": (
+                    f"Forecast has only {source_count} source(s); "
+                    f"minimum {MIN_FORECAST_SOURCE_COUNT} independent sources required."
+                ),
             }
         return {"blocked": False, "reason": ""}
 
