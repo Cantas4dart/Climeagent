@@ -44,6 +44,54 @@ def build_aligned_mono_row(left: str, right: str, left_width: int = 22) -> str:
     return f"{left.ljust(left_width)}{right}"
 
 
+def format_percent(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def format_forecast_temp(signal: dict[str, Any]) -> str:
+    forecast_data = signal.get("forecast_data") if isinstance(signal.get("forecast_data"), dict) else {}
+    unit = "F" if signal.get("temperature_unit") == "fahrenheit" else "C"
+    values = []
+    for source, temp in forecast_data.items():
+        try:
+            values.append((str(source), float(temp)))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return "n/a"
+    average_temp = sum(temp for _, temp in values) / len(values)
+    source_text = ", ".join(f"{source.upper()} {temp:.1f}{unit}" for source, temp in values[:3])
+    return f"{average_temp:.1f}{unit} avg ({source_text})"
+
+
+def build_signal_rationale(signal: dict[str, Any], side: str) -> list[str]:
+    side_prob = signal.get("trade_side_model_prob")
+    if side_prob is None:
+        try:
+            adjusted_yes = float(signal.get("adjusted_model_prob"))
+            side_prob = adjusted_yes if side == "YES" else 1 - adjusted_yes
+        except (TypeError, ValueError):
+            side_prob = None
+    side_market = signal.get("trade_side_market_price")
+    if side_market is None:
+        side_market = signal.get("market_price_yes") if side == "YES" else signal.get("market_price_no")
+
+    reasons = [
+        f"Model {format_percent(side_prob)} vs market {format_percent(side_market)}",
+        f"Edge {format_percent(signal.get('abs_edge'))}, confidence {format_percent(signal.get('confidence_score'))}",
+    ]
+    mode = signal.get("mode")
+    regime = signal.get("regime")
+    if mode or regime:
+        reasons.append(f"Mode {mode or 'standard'} / regime {regime or 'n/a'}")
+    if signal.get("forecast_revision_direction"):
+        reasons.append(f"Forecast trend {signal.get('forecast_revision_direction')}")
+    return reasons
+
+
 class TradeExecutor:
     def __init__(self):
         self.db = DBManager()
@@ -535,16 +583,24 @@ class TradeExecutor:
         if not self.telegram_bot_token:
             return
 
+        rationale = build_signal_rationale(signal, side)
         lines = [
             "📊 <b>Paper Signal</b>",
             "",
             "<b>🪙 Market</b>",
             escape_html(signal.get("question") or signal.get("market_id")),
             "",
+            "<b>🌡️ Forecast</b>",
+            f"├ Temp {escape_html(format_forecast_temp(signal))}",
+            f"└ Mode {escape_html(str(signal.get('mode') or 'standard'))}",
+            "",
             "<b>🎯 Position</b>",
             f"├ {side}",
             f"├ Entry @{entry_price:.4f}",
             f"└ 1 Shares (Amount in pUSD)",
+            "",
+            "<b>Why This Side</b>",
+            *[f"├ {escape_html(reason)}" if index < len(rationale) - 1 else f"└ {escape_html(reason)}" for index, reason in enumerate(rationale)],
         ]
         self.send_telegram_alert(tg_id, "\n".join(lines), "paper trade")
 
@@ -568,11 +624,8 @@ class TradeExecutor:
             f"├ Entry @{entry_price:.4f}",
             f"└ {size} Shares (Amount in pUSD)",
         ]
-        if order_response.get("orderID"):
-            lines.extend(["", "<b>Order ID</b>", escape_html(str(order_response.get("orderID")))])
-        if order_response.get("status"):
-            lines.extend(["<b>Status</b>", escape_html(str(order_response.get("status")))])
-        lines.extend(["", "<i>Order accepted by Polymarket. It may still be waiting to fill.</i>"])
+        lines.extend(["", "<b>Status</b>", "Successful"])
+        lines.extend(["", "<i>Order accepted by Polymarket.</i>"])
         self.send_telegram_alert(tg_id, "\n".join(lines), "trade")
 
     def send_exit_alert(
