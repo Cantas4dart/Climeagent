@@ -280,5 +280,61 @@ class TemperatureTargetParsingTests(unittest.TestCase):
         self.assertEqual(target, {"type": "threshold", "direction": "above", "val": 72.0})
 
 
+class FreshForecastIntelligenceTests(unittest.TestCase):
+    def setUp(self):
+        self.generator = SignalGenerator()
+
+    def test_fresh_intelligence_boosts_protected_exact_rung_without_history(self):
+        result = self.generator._fresh_forecast_intelligence(
+            avg_prob=0.42,
+            spread=0.01,
+            forecast_data={"ecmwf": 24.01, "gfs": 24.09, "openmeteo": 24.0},
+            target={"type": "exact", "val": 24.0},
+            market_context={
+                "local_date": "2026-05-22",
+                "market_date": "2026-05-22",
+                "forecast_bundle_age_minutes": 1.0,
+                "provider_issue_age_minutes": 40.0,
+                "metar_available": True,
+                "metar_age_hours": 0.25,
+                "temp_dispersion": 0.04,
+                "exact_rounding_protected": True,
+                "exact_rounding_consensus": 1.0,
+                "exact_target_distance": 0.03,
+            },
+            sanity={"yes_price": 0.39},
+        )
+
+        self.assertTrue(result["enabled"])
+        self.assertTrue(result["fresh_forecast_only"])
+        self.assertFalse(result["used_history"])
+        self.assertGreater(result["probability"], 0.42)
+
+    def test_fresh_intelligence_refuses_stale_same_day_bundle(self):
+        result = self.generator._fresh_forecast_intelligence(
+            avg_prob=0.42,
+            spread=0.01,
+            forecast_data={"ecmwf": 24.01, "gfs": 24.09},
+            target={"type": "exact", "val": 24.0},
+            market_context={
+                "local_date": "2026-05-22",
+                "market_date": "2026-05-22",
+                "forecast_bundle_age_minutes": 25.0,
+                "provider_issue_age_minutes": 40.0,
+                "metar_available": True,
+                "metar_age_hours": 0.25,
+                "temp_dispersion": 0.04,
+                "exact_rounding_protected": True,
+                "exact_rounding_consensus": 1.0,
+                "exact_target_distance": 0.03,
+            },
+            sanity={"yes_price": 0.39},
+        )
+
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["probability"], 0.42)
+        self.assertIn("fresh-only", result["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

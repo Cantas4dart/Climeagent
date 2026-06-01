@@ -22,6 +22,7 @@ class User:
     max_trade_amount: float
     auto_claim: int
     max_open_positions: int
+    stop_loss_percent: float
 
 
 @dataclass
@@ -136,7 +137,8 @@ class DBManager:
               risk_percent REAL DEFAULT 1.0,
               max_trade_amount REAL DEFAULT 10.0,
               auto_claim INTEGER DEFAULT 1,
-              max_open_positions INTEGER DEFAULT 10
+              max_open_positions INTEGER DEFAULT 10,
+              stop_loss_percent REAL DEFAULT 10.0
             )
             """
         )
@@ -293,6 +295,7 @@ class DBManager:
             ("paper_testing_active", "INTEGER DEFAULT 0"),
             ("auto_claim", "INTEGER DEFAULT 1"),
             ("max_open_positions", "INTEGER DEFAULT 10"),
+            ("stop_loss_percent", "REAL DEFAULT 10.0"),
         ]:
             self.ensure_column("users", column, definition)
         self.ensure_unique_trade_per_market()
@@ -490,6 +493,11 @@ class DBManager:
     def update_max_open_positions(self, tg_id: str, max_open_positions: int):
         self.ensure_user(tg_id)
         self.conn.execute("UPDATE users SET max_open_positions = ? WHERE tg_id = ?", (max_open_positions, tg_id))
+        self.conn.commit()
+
+    def update_stop_loss_percent(self, tg_id: str, stop_loss_percent: float):
+        self.ensure_user(tg_id)
+        self.conn.execute("UPDATE users SET stop_loss_percent = ? WHERE tg_id = ?", (stop_loss_percent, tg_id))
         self.conn.commit()
 
     def update_polymarket_account_config(self, tg_id: str, funder_address: str | None, signature_type: int | None):

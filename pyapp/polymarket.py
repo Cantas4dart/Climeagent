@@ -621,7 +621,7 @@ class PolyMarketAPI:
         zero_bytes32 = "0x" + ("0" * 64)
         print(f"[POLY] Redeeming winnings for condition {condition_id}...")
         txn = contract.functions.redeemPositions(
-            Web3.to_checksum_address(self.usdc_address),
+            Web3.to_checksum_address(self.pusd_address),
             zero_bytes32,
             condition_id,
             [1, 2],

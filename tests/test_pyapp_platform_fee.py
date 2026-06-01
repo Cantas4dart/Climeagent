@@ -21,12 +21,14 @@ class PlatformFeeTests(unittest.TestCase):
         )
 
         poly = SimpleNamespace(
+            get_signer_address=lambda: "0xwallet",
+            get_positions=lambda address: [{"conditionId": "cond-1", "size": 1, "redeemable": True}],
             redeem_winnings=lambda condition_id: "claim-tx",
             transfer_pusd=lambda recipient, amount: "fee-tx",
         )
         mock_poly_cls.return_value = poly
 
-        user = SimpleNamespace(api_key="k", api_secret="s", api_passphrase="p", private_key="pk")
+        user = SimpleNamespace(api_key="k", api_secret="s", api_passphrase="p", private_key="pk", funder_address=None, signature_type=None)
         receipt = bot.claim_trade_by_id_for_user("123", user, 1)
 
         self.assertEqual(db_calls["claimed"], ("123", "cond-1", "claim-tx"))
@@ -48,12 +50,14 @@ class PlatformFeeTests(unittest.TestCase):
         )
 
         poly = SimpleNamespace(
+            get_signer_address=lambda: "0xwallet",
+            get_positions=lambda address: [{"conditionId": "cond-1", "size": 1, "redeemable": True}],
             redeem_winnings=lambda condition_id: "claim-tx",
             transfer_pusd=lambda recipient, amount: self.fail("Admin should not pay platform fee."),
         )
         mock_poly_cls.return_value = poly
 
-        user = SimpleNamespace(api_key="k", api_secret="s", api_passphrase="p", private_key="pk")
+        user = SimpleNamespace(api_key="k", api_secret="s", api_passphrase="p", private_key="pk", funder_address=None, signature_type=None)
         receipt = bot.claim_trade_by_id_for_user(PLATFORM_FEE_ADMIN_TG_ID, user, 1)
 
         self.assertEqual(db_calls["assessed"], [])

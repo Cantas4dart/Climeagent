@@ -349,6 +349,58 @@ class ExecutorLiveBehaviorTests(unittest.TestCase):
         self.assertIsNone(recorded["limit_order"])
         self.assertEqual(recorded["market_order"], ("yes-token", "BUY", 1.0))
 
+    def test_auto_exit_clamps_sell_to_live_position_and_floors_to_cent_size(self):
+        executor = TradeExecutor.__new__(TradeExecutor)
+        recorded = {"order": None, "exit": None}
+        trade = SimpleNamespace(
+            id=7,
+            tg_id="u1",
+            market_id="m1",
+            condition_id="cond-1",
+            side="YES",
+            buy_price=0.23,
+            remaining_size=5.391304,
+            size=5.391304,
+            order_id=None,
+            entry_model_prob=0.6,
+            entry_market_prob=0.4,
+            entry_confidence=0.9,
+            entry_spread=0.01,
+        )
+        user = SimpleNamespace(
+            tg_id="u1",
+            trading_active=1,
+            private_key="0x" + "11" * 32,
+            funder_address="0xwallet",
+            signature_type=1,
+            api_key="k",
+            api_secret="s",
+            api_passphrase="p",
+            stop_loss_percent=10.0,
+        )
+
+        executor.db = SimpleNamespace(
+            get_active_trades_for_monitoring=lambda: [trade],
+            get_user=lambda tg_id: user,
+            record_trade_exit=lambda trade_id, remaining_size, exit_price, reason, fully_closed: recorded.__setitem__(
+                "exit", (trade_id, remaining_size, exit_price, reason, fully_closed)
+            ),
+        )
+        executor.send_exit_alert = lambda *args, **kwargs: None
+
+        poly = SimpleNamespace(
+            get_open_orders=lambda: [],
+            get_market_by_id=lambda market_id: {"clobTokenIds": "[\"yes-token\", \"no-token\"]"},
+            get_positions=lambda address: [{"asset": "yes-token", "conditionId": "cond-1", "outcome": "Yes", "size": 5.389608}],
+            place_market_order=lambda token_id, side, amount: recorded.__setitem__("order", (token_id, side, amount)) or {"orderID": "sell-1"},
+        )
+        executor.build_poly_client = lambda user, account_config: poly
+
+        executor.process_open_trades([{"market_id": "m1", "market_price_yes": 0.2}])
+
+        self.assertEqual(recorded["order"], ("yes-token", "SELL", 5.38))
+        self.assertEqual(recorded["exit"], (7, 0.0, 0.2, "price dropped 10.00% from entry", True))
+
 
 class SettlementLiveBehaviorTests(unittest.TestCase):
     def test_check_settlements_marks_live_trade_settled(self):
@@ -707,6 +759,74 @@ class ReportFormattingTests(unittest.TestCase):
 
 
 class DashboardSyncTests(unittest.TestCase):
+    @patch("pyapp.bot.PolyMarketAPI")
+    def test_live_dashboard_uses_live_position_count_and_hides_position_list(self, mock_poly_cls):
+        bot = TelegramPollingBot.__new__(TelegramPollingBot)
+        bot.db = SimpleNamespace(
+            get_unsettled_trade_count=lambda user_id: 9,
+            get_claimable_trades=lambda user_id: [],
+            get_paper_stats=lambda user_id: {"total": 0, "wins": 0, "losses": 0, "pnl": 0.0},
+            get_trades_for_user=lambda user_id: [],
+        )
+        bot.sync_live_positions_to_db = lambda *args, **kwargs: 0
+        poly = SimpleNamespace(
+            get_signer_address=lambda: "0x0000000000000000000000000000000000000009",
+            get_positions=lambda address: [
+                {"asset": "yes-token", "title": "Live A", "size": 2, "avgPrice": 0.4},
+                {"asset": "no-token", "title": "Live B", "size": 3, "avgPrice": 0.5},
+            ],
+            get_open_orders=lambda: [],
+        )
+        mock_poly_cls.return_value = poly
+        user = SimpleNamespace(
+            tg_id="u1",
+            paper_testing_active=0,
+            auto_claim=1,
+            private_key="0x" + "11" * 32,
+            api_key="k",
+            api_secret="s",
+            api_passphrase="p",
+            funder_address="0x0000000000000000000000000000000000000008",
+            signature_type=1,
+        )
+
+        view = bot.build_positions_dashboard("u1", user)
+
+        self.assertIn("Open Positions    2", view["text"])
+        self.assertIn("Working Orders    0", view["text"])
+        self.assertIn("Dashboard Wallet", view["text"])
+        self.assertNotIn("- Live A", view["text"])
+
+    @patch("pyapp.bot.PolyMarketAPI")
+    def test_active_positions_page_lists_all_live_positions(self, mock_poly_cls):
+        bot = TelegramPollingBot.__new__(TelegramPollingBot)
+        bot.db = SimpleNamespace(get_trades_for_user=lambda user_id: [])
+        poly = SimpleNamespace(
+            get_signer_address=lambda: "0x0000000000000000000000000000000000000009",
+            get_positions=lambda address: [
+                {"asset": "yes-token", "title": "Live A", "size": 2, "avgPrice": 0.4},
+                {"asset": "no-token", "title": "Live B", "size": 3, "avgPrice": 0.5},
+            ],
+        )
+        mock_poly_cls.return_value = poly
+        user = SimpleNamespace(
+            tg_id="u1",
+            paper_testing_active=0,
+            auto_claim=1,
+            private_key="0x" + "11" * 32,
+            api_key="k",
+            api_secret="s",
+            api_passphrase="p",
+            funder_address="0x0000000000000000000000000000000000000008",
+            signature_type=1,
+        )
+
+        view = bot.build_active_positions_page(user)
+
+        self.assertIn("Count             2", view["text"])
+        self.assertIn("- Live A", view["text"])
+        self.assertIn("- Live B", view["text"])
+
     def test_sync_live_positions_imports_manual_position_into_trade_tracking(self):
         bot = TelegramPollingBot.__new__(TelegramPollingBot)
         imported = []

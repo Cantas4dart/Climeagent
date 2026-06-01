@@ -398,11 +398,11 @@ class SettlementMonitor:
                 except Exception as exc:
                     print(f"[PYSETTLE] Temperature analysis failed for live trade {trade.id}: {exc}")
 
-                claim_message = "Manual claim available with /claim or /claim_all."
+                claim_message = "Manual redeem available with /redeem or /redeem_all."
                 if win:
                     claim_result = self.try_auto_claim(trade)
                     if claim_result.get("claimed") and claim_result.get("txHash"):
-                        claim_message = f"Auto-claimed: https://polygonscan.com/tx/{claim_result['txHash']}"
+                        claim_message = f"Auto-redeemed: https://polygonscan.com/tx/{claim_result['txHash']}"
                         fee_result = claim_result.get("fee") or {}
                         if fee_result.get("applied") and fee_result.get("txHash"):
                             claim_message += (
@@ -410,7 +410,7 @@ class SettlementMonitor:
                                 f"(https://polygonscan.com/tx/{fee_result['txHash']})"
                             )
                     elif claim_result.get("reason"):
-                        claim_message = f"Auto-claim skipped: {claim_result['reason']}"
+                        claim_message = f"Auto-redeem skipped: {claim_result['reason']}"
 
                 status = "WIN" if win else "LOSS"
                 roi = (
@@ -533,10 +533,10 @@ class SettlementMonitor:
             tx_hash = poly.redeem_winnings(str(trade.condition_id))
             self.db.mark_claimed_by_condition(trade.tg_id, str(trade.condition_id), tx_hash)
             fee_result = self.collect_platform_fee_for_trades(trade.tg_id, poly, [trade])
-            print(f"[PYSETTLE] Auto-claimed condition {trade.condition_id} for {trade.tg_id}: {tx_hash}")
+            print(f"[PYSETTLE] Auto-redeemed condition {trade.condition_id} for {trade.tg_id}: {tx_hash}")
             return {"claimed": True, "txHash": tx_hash, "fee": fee_result}
         except Exception as exc:
-            print(f"[PYSETTLE] Auto-claim failed for {trade.tg_id} / {trade.condition_id}: {exc}")
+            print(f"[PYSETTLE] Auto-redeem failed for {trade.tg_id} / {trade.condition_id}: {exc}")
             return {"claimed": False, "reason": str(exc)}
 
     def collect_platform_fee_for_trades(self, user_id: str, poly: PolyMarketAPI, trades: list[Trade]) -> dict[str, Any]:
@@ -713,7 +713,7 @@ class SettlementMonitor:
                 f"├ Position {position_text}",
                 f"└ Return: {roi}",
                 "",
-                "<b>📌 Claim Status</b>",
+                "<b>📌 Redeem Status</b>",
                 safe_claim_message,
                 "",
                 "<i>Use /stats for performance and /daily for the latest summary.</i>",

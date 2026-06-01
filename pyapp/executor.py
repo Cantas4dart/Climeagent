@@ -328,18 +328,15 @@ class TradeExecutor:
             if not user or not user.trading_active:
                 continue
 
-            assessment = self.assess_conflict(trade, state)
-            if assessment["exitFraction"] <= 0:
+            stop_assessment = self.assess_stop_loss(trade, state, user)
+            if not stop_assessment["triggered"]:
                 continue
 
             remaining_size = max(0.0, float(trade.remaining_size or trade.size or 0))
             if remaining_size <= 0:
                 continue
 
-            shares_to_sell = min(
-                remaining_size,
-                round(remaining_size * assessment["exitFraction"], SHARE_SIZE_PRECISION),
-            )
+            shares_to_sell = remaining_size
             if shares_to_sell <= 0:
                 continue
             poly = self.build_poly_client(user, resolve_user_polymarket_account_config(user))
@@ -385,31 +382,24 @@ class TradeExecutor:
                     )
                     continue
                 order_response = poly.place_market_order(token_id, "SELL", shares_to_sell)
-                new_remaining_size = max(0.0, round(min(remaining_size, live_size) - shares_to_sell, SHARE_SIZE_PRECISION))
-                exit_price = (
-                    float(state.get("market_price_yes", trade.buy_price or 0))
-                    if trade.side == "YES"
-                    else float(state.get("market_price_no", trade.buy_price or 0))
-                )
-                fully_closed = new_remaining_size <= MIN_SELL_SIZE_SHARES
-                if fully_closed:
-                    new_remaining_size = 0.0
-                self.db.record_trade_exit(trade.id, new_remaining_size, exit_price, assessment["reason"], fully_closed)
+                new_remaining_size = 0.0
+                exit_price = float(stop_assessment["currentPrice"])
+                self.db.record_trade_exit(trade.id, new_remaining_size, exit_price, stop_assessment["reason"], True)
                 self.send_exit_alert(
                     trade.tg_id,
                     trade,
                     state,
                     shares_to_sell,
                     new_remaining_size,
-                    assessment,
+                    stop_assessment,
                     order_response,
                 )
                 print(
-                    f"[PYEXEC] Auto-exit submitted for {trade.tg_id} on market {trade.market_id}: "
-                    f"{shares_to_sell}/{remaining_size} shares, remaining={new_remaining_size}"
+                    f"[PYEXEC] Stop-loss exit submitted for {trade.tg_id} on market {trade.market_id}: "
+                    f"{shares_to_sell}/{remaining_size} shares at {exit_price:.4f}"
                 )
             except Exception as exc:
-                print(f"[PYEXEC ERROR] Auto-exit failed for {trade.tg_id} / {trade.market_id}: {exc}")
+                print(f"[PYEXEC ERROR] Stop-loss exit failed for {trade.tg_id} / {trade.market_id}: {exc}")
 
     @staticmethod
     def floor_sell_size(size: float) -> float:
@@ -455,6 +445,33 @@ class TradeExecutor:
                 return 0.0
 
         return 0.0
+
+    def assess_stop_loss(self, trade: Any, state: dict[str, Any], user: User) -> dict[str, Any]:
+        entry_price = float(trade.buy_price or 0.0)
+        if entry_price <= 0:
+            return {"triggered": False}
+        current_price = (
+            float(state.get("market_price_yes", entry_price))
+            if trade.side == "YES"
+            else float(state.get("market_price_no", entry_price))
+        )
+        stop_loss_percent = float(getattr(user, "stop_loss_percent", 10.0) or 10.0)
+        stop_price = entry_price * (1.0 - (stop_loss_percent / 100.0))
+        if current_price > stop_price:
+            return {
+                "triggered": False,
+                "currentPrice": current_price,
+                "stopPrice": stop_price,
+                "stopLossPercent": stop_loss_percent,
+            }
+        return {
+            "triggered": True,
+            "conflictScore": 1.0,
+            "currentPrice": round(current_price, 4),
+            "stopPrice": round(stop_price, 4),
+            "stopLossPercent": round(stop_loss_percent, 4),
+            "reason": f"price dropped {stop_loss_percent:.2f}% from entry",
+        }
 
     def build_poly_client(self, user: User, account_config: dict[str, Any]) -> PolyMarketAPI:
         return PolyMarketAPI(
@@ -639,17 +656,17 @@ class TradeExecutor:
         order_response: dict[str, Any],
     ):
         lines = [
-            "<b>Conflict Exit</b>",
+            "<b>Stop-Loss Exit</b>",
             "",
             "<b>Market</b>",
             escape_html(state.get("question") or trade.market_id),
             "",
-            "<b>Side Reduced</b>          <b>Reason</b>",
+            "<b>Side Sold</b>          <b>Reason</b>",
             f"{trade.side}{' ' * max(1, 16 - len(str(trade.side)))}{assessment['reason']}",
             f"Sold {shares_sold} | Left {remaining_size}",
             "",
-            "<b>Conflict Score</b>",
-            f"<b>{float(assessment['conflictScore']):.2f}</b>",
+            "<b>Stop Price</b>",
+            f"Entry {float(trade.buy_price or 0):.4f} | Stop {float(assessment.get('stopPrice', 0)):.4f} | Current {float(assessment.get('currentPrice', 0)):.4f}",
         ]
         if order_response.get("orderID"):
             lines.append(f"<b>Order ID</b>  {escape_html(str(order_response.get('orderID')))}")

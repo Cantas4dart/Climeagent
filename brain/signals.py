@@ -82,7 +82,7 @@ class SignalGenerator:
         self.log(f"\n[SIGNAL] {'='*55}")
         self.log(f"[SIGNAL]   SCAN #{self.run_count} -- {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         self.log(f"[SIGNAL] {'='*55}")
-        self.log("[SIGNAL] Live decision layer: raw ensemble model only.")
+        self.log("[SIGNAL] Live decision layer: fresh forecast intelligence enabled.")
         scope_labels = {
             "us": "US-only",
             "non_us": "non-US-only",
@@ -251,6 +251,7 @@ class SignalGenerator:
                     )
                     freshness = self._forecast_freshness_snapshot(forecast, market_context, market_date)
                     market_context.update(freshness)
+                    market_context["market_date"] = market_date.isoformat()
                     self.log(
                         f"[SIGNAL] | Local Time: {market_context['local_now']} "
                         f"| Hour: {market_context['local_hour']} "
@@ -322,10 +323,20 @@ class SignalGenerator:
                         days_to_resolution,
                         local_peak_stage=market_context["local_peak_stage"],
                     )
-                    learned_prob = avg_prob
+                    intelligence = self._fresh_forecast_intelligence(
+                        avg_prob=avg_prob,
+                        spread=spread,
+                        forecast_data=forecast_data,
+                        target=target,
+                        market_context=market_context,
+                        sanity=sanity,
+                    )
+                    learned_prob = intelligence["probability"]
                     self.log(
-                        f"[SIGNAL] | Decision Prob: {learned_prob:.2%} "
-                        "(using raw ensemble probability)"
+                        f"[SIGNAL] | Intelligence Prob: {learned_prob:.2%} "
+                        f"(raw={avg_prob:.2%}, blend={intelligence['blend_weight']:.2f}, "
+                        f"fresh={intelligence['freshness_score']:.2f}, "
+                        f"edge score={intelligence['inefficiency_score']:.2%})"
                     )
 
                     decision = self.model.evaluate_market_opportunity(
@@ -379,6 +390,7 @@ class SignalGenerator:
                         sanity=sanity,
                         entry_timing_gate=entry_timing_gate,
                         decision=decision,
+                        intelligence=intelligence,
                     )
 
                     final_yes_prob = float(decision.get("calibrated_model_prob", decision["adjusted_model_prob"]))
@@ -447,9 +459,9 @@ class SignalGenerator:
                         "base_required_edge": round(decision.get("base_required_edge", decision["required_edge"]), 4),
                         "price_band": decision.get("price_band"),
                         "required_confidence": round(decision.get("required_confidence", 0.0), 4),
-                        "learning_confidence": 0.0,
-                        "inefficiency_score": 0.0,
-                        "segment_adjustment": 0.0,
+                        "learning_confidence": round(intelligence["freshness_score"], 4),
+                        "inefficiency_score": round(intelligence["inefficiency_score"], 4),
+                        "segment_adjustment": round(intelligence["probability_delta"], 4),
                         "action": decision["action"],
                         "should_trade": decision["should_trade"],
                         "days_to_resolution": days_to_resolution,
@@ -549,9 +561,9 @@ class SignalGenerator:
                             "base_required_edge": round(decision.get("base_required_edge", decision["required_edge"]), 4),
                             "price_band": decision.get("price_band"),
                             "required_confidence": round(decision.get("required_confidence", 0.0), 4),
-                            "learning_confidence": 0.0,
-                            "inefficiency_score": 0.0,
-                            "segment_adjustment": 0.0,
+                            "learning_confidence": round(intelligence["freshness_score"], 4),
+                            "inefficiency_score": round(intelligence["inefficiency_score"], 4),
+                            "segment_adjustment": round(intelligence["probability_delta"], 4),
                             "learning_features": learning_payload,
                             "market_snapshot": sanity["snapshot"],
                             "timestamp": str(datetime.now())
@@ -1493,6 +1505,112 @@ class SignalGenerator:
             }
         return {"blocked": False, "reason": ""}
 
+    def _fresh_forecast_intelligence(self, avg_prob, spread, forecast_data, target, market_context, sanity):
+        """
+        Stateless decision nudge that only consumes the forecast bundle from this
+        scan. Historical trades, saved forecast history, and calibration buckets
+        are intentionally excluded so stale data cannot pollute the live layer.
+        """
+        avg_prob = float(avg_prob)
+        market_price = float((sanity or {}).get("yes_price", 0.5))
+        source_count = len(forecast_data or {})
+        bundle_age = float((market_context or {}).get("forecast_bundle_age_minutes", 9999.0) or 9999.0)
+        provider_age = float((market_context or {}).get("provider_issue_age_minutes", 9999.0) or 9999.0)
+        metar_age = float((market_context or {}).get("metar_age_hours", 9999.0) or 9999.0)
+        local_date = str((market_context or {}).get("local_date") or "")
+        market_date = str((market_context or {}).get("market_date") or "")
+        same_day = bool(local_date and market_date and local_date == market_date)
+
+        stale_reason = ""
+        if same_day and bundle_age > 15.0:
+            stale_reason = f"forecast bundle age {bundle_age:.1f}m exceeds fresh-only limit"
+        elif same_day and provider_age > 240.0:
+            stale_reason = f"provider issue age {provider_age:.1f}m exceeds fresh-only limit"
+        elif same_day and bool((market_context or {}).get("metar_available")) and metar_age > 3.0:
+            stale_reason = f"station observation age {metar_age:.2f}h exceeds fresh-only limit"
+
+        if stale_reason:
+            return {
+                "enabled": False,
+                "fresh_forecast_only": True,
+                "used_history": False,
+                "probability": avg_prob,
+                "raw_probability": avg_prob,
+                "evidence_probability": avg_prob,
+                "probability_delta": 0.0,
+                "blend_weight": 0.0,
+                "freshness_score": 0.0,
+                "inefficiency_score": abs(avg_prob - market_price),
+                "reason": stale_reason,
+            }
+
+        source_score = min(source_count / 4.0, 1.0)
+        bundle_score = max(0.0, 1.0 - min(bundle_age / 15.0, 1.0)) if same_day else 0.70
+        provider_score = max(0.0, 1.0 - min(provider_age / 240.0, 1.0)) if same_day else 0.70
+        station_score = 0.70
+        if bool((market_context or {}).get("metar_available")):
+            station_score = max(0.0, 1.0 - min(metar_age / 3.0, 1.0))
+
+        freshness_score = max(
+            0.0,
+            min(
+                1.0,
+                (bundle_score * 0.35)
+                + (provider_score * 0.25)
+                + (station_score * 0.20)
+                + (source_score * 0.20),
+            ),
+        )
+        temp_dispersion = float((market_context or {}).get("temp_dispersion", 0.0) or 0.0)
+        dispersion_penalty = min(max(temp_dispersion / 0.30, 0.0), 1.0) * 0.18
+        evidence_prob = avg_prob
+        reasons = ["fresh forecast only"]
+
+        target = target or {}
+        if target.get("type") == "exact" and bool((market_context or {}).get("exact_rounding_protected", False)):
+            target_distance = float((market_context or {}).get("exact_target_distance", 0.0) or 0.0)
+            closeness = max(0.0, 1.0 - min(target_distance / 0.50, 1.0))
+            consensus = float((market_context or {}).get("exact_rounding_consensus", 0.0) or 0.0)
+            protected_floor = 0.58 + (0.14 * closeness) + (0.04 * min(consensus, 1.0))
+            evidence_prob = max(evidence_prob, protected_floor - dispersion_penalty)
+            reasons.append("protected exact-rung consensus")
+
+        if target.get("type") in {"range", "threshold"}:
+            forecast_avg = (market_context or {}).get("forecast_avg")
+            if forecast_avg is not None and target.get("type") == "range":
+                low = float(target.get("low", forecast_avg))
+                high = float(target.get("high", forecast_avg))
+                if low <= float(forecast_avg) <= high + 0.9 and temp_dispersion <= 0.08:
+                    evidence_prob = min(0.92, evidence_prob + (0.04 * freshness_score))
+                    reasons.append("low-dispersion range support")
+            elif forecast_avg is not None and target.get("type") == "threshold":
+                direction = str(target.get("direction") or "above")
+                threshold = float(target.get("val", forecast_avg))
+                margin = float(forecast_avg) - threshold
+                aligned = (direction == "above" and margin >= 0.35) or (direction == "below" and margin <= -0.35)
+                if aligned and temp_dispersion <= 0.08:
+                    evidence_prob = min(0.92, evidence_prob + (0.03 * freshness_score))
+                    reasons.append("low-dispersion threshold support")
+
+        evidence_prob = min(max(evidence_prob, 0.01), 0.99)
+        blend_weight = min(0.45, max(0.0, freshness_score * (0.22 + (source_score * 0.23))))
+        decision_prob = avg_prob + ((evidence_prob - avg_prob) * blend_weight)
+        decision_prob = min(max(decision_prob, 0.01), 0.99)
+
+        return {
+            "enabled": True,
+            "fresh_forecast_only": True,
+            "used_history": False,
+            "probability": decision_prob,
+            "raw_probability": avg_prob,
+            "evidence_probability": evidence_prob,
+            "probability_delta": decision_prob - avg_prob,
+            "blend_weight": blend_weight,
+            "freshness_score": freshness_score,
+            "inefficiency_score": abs(decision_prob - market_price),
+            "reason": "; ".join(reasons),
+        }
+
     def _is_live_tradeable_location(self, location):
         is_us = bool((location or {}).get("is_us"))
         if self.live_market_scope == "all":
@@ -1513,7 +1631,21 @@ class SignalGenerator:
         sanity,
         entry_timing_gate,
         decision,
+        intelligence=None,
     ):
+        intelligence = intelligence or {
+            "enabled": False,
+            "fresh_forecast_only": True,
+            "used_history": False,
+            "probability": avg_prob,
+            "raw_probability": avg_prob,
+            "evidence_probability": avg_prob,
+            "probability_delta": 0.0,
+            "blend_weight": 0.0,
+            "freshness_score": 0.0,
+            "inefficiency_score": 0.0,
+            "reason": "not evaluated",
+        }
         target_type = str((target or {}).get("type") or "threshold")
         direction = str((target or {}).get("direction") or "above")
         source_count = len((market_context or {}).get("forecast_data", {}) or [])
@@ -1572,14 +1704,21 @@ class SignalGenerator:
                 "entry_timing_reason": entry_timing_gate["reason"],
                 "pattern_veto": "yes" if decision.get("yes_veto_applied") else ("no" if decision.get("no_veto_applied") else "none"),
                 "veto_side": "YES" if decision.get("yes_veto_applied") else ("NO" if decision.get("no_veto_applied") else "NONE"),
-                "intelligence_enabled": False,
+                "intelligence_enabled": bool(intelligence.get("enabled")),
+                "fresh_forecast_only": bool(intelligence.get("fresh_forecast_only", True)),
+                "intelligence_used_history": bool(intelligence.get("used_history", False)),
+                "intelligence_reason": intelligence.get("reason"),
             },
             "base_prob": round(avg_prob, 6),
             "market_yes_price": round(market_price, 6),
-            "intelligence_prob": round(avg_prob, 6),
-            "decision_prob": round(avg_prob, 6),
-            "decision_delta": 0.0,
-            "model_blend": 0.0,
+            "intelligence_prob": round(float(intelligence.get("probability", avg_prob)), 6),
+            "decision_prob": round(float(intelligence.get("probability", avg_prob)), 6),
+            "decision_delta": round(float(intelligence.get("probability_delta", 0.0)), 6),
+            "model_blend": round(float(intelligence.get("blend_weight", 0.0)), 6),
+            "freshness_score": round(float(intelligence.get("freshness_score", 0.0)), 6),
+            "inefficiency_score": round(float(intelligence.get("inefficiency_score", 0.0)), 6),
+            "fresh_forecast_only": bool(intelligence.get("fresh_forecast_only", True)),
+            "intelligence_used_history": bool(intelligence.get("used_history", False)),
             "market_snapshot": sanity.get("snapshot") or {},
             "decision": {
                 "action": decision["action"],

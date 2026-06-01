@@ -142,7 +142,7 @@ def build_positions_keyboard(auto_claim: bool, has_claimables: bool) -> dict[str
     return keyboard(
         [
             [("🏠 Home", "positions:main"), ("🔄 Refresh", "positions:refresh")],
-            [("🏆 Claimable", "positions:claimable"), ("⚙️ Setup", "positions:setup")],
+            [("🏆 Redeemable", "positions:claimable"), ("⚙️ Setup", "positions:setup")],
             [("📍 Positions", "positions:active_positions"), ("📋 Orders", "positions:orders")],
             [("📜 History", "positions:history")],
             [("💰 Balance", "positions:balance"), ("📈 Status", "positions:status")],
@@ -150,7 +150,7 @@ def build_positions_keyboard(auto_claim: bool, has_claimables: bool) -> dict[str
             [("📊 All Time", "positions:all_time")],
             [("🎛️ Controls", "positions:controls"), ("❓ Help", "positions:help")],
             [
-                ("🎉 Claim All", "positions:claim_all" if has_claimables else "positions:claimable"),
+                ("🎉 Redeem All", "positions:redeem_all" if has_claimables else "positions:claimable"),
                 ("✋ Auto-Claim Off" if auto_claim else "🤖 Auto-Claim On", "positions:auto_claim_off" if auto_claim else "positions:auto_claim_on"),
             ],
         ]
@@ -177,13 +177,13 @@ def build_detail_keyboard(auto_claim: bool, has_claimables: bool, page: str) -> 
     return keyboard(
         [
             [("🏠 Home", "positions:main"), ("📊 Dashboard", "positions:refresh"), ("🔄 Refresh", f"positions:{page}")],
-            [("🏆 Claimable", "positions:claimable"), ("⚙️ Setup", "positions:setup")],
+            [("🏆 Redeemable", "positions:claimable"), ("⚙️ Setup", "positions:setup")],
             [("💰 Balance", "positions:balance"), ("📈 Status", "positions:status")],
             [("📊 Overall", "positions:stats"), ("📅 Daily", "positions:daily")],
             [("📆 Weekly", "positions:weekly")],
             [("🎛️ Controls", "positions:controls"), ("❓ Help", "positions:help")],
             [
-                ("🎉 Claim All", "positions:claim_all" if has_claimables else "positions:claimable"),
+                ("🎉 Redeem All", "positions:redeem_all" if has_claimables else "positions:claimable"),
                 ("✋ Auto-Claim Off" if auto_claim else "🤖 Auto-Claim On", "positions:auto_claim_off" if auto_claim else "positions:auto_claim_on"),
             ],
         ]
@@ -195,7 +195,8 @@ def build_risk_keyboard() -> dict[str, Any]:
         [
             [("⚙️ Setup", "positions:setup"), ("🔄 Refresh", "positions:risk_settings")],
             [("📊 Set Risk %", "positions:risk_prompt"), ("💵 Set Max $", "positions:max_prompt")],
-            [("📈 Set Max Open", "positions:max_open_prompt"), ("🎛️ Controls", "positions:controls")],
+            [("📈 Set Max Open", "positions:max_open_prompt"), ("🛑 Set Stop %", "positions:stop_loss_prompt")],
+            [("🎛️ Controls", "positions:controls")],
         ]
     )
 
@@ -226,9 +227,9 @@ def build_controls_keyboard(user: User | None) -> dict[str, Any]:
 def build_claimable_keyboard(claimable_trades: list[Trade], auto_claim: bool) -> dict[str, Any]:
     rows: list[list[tuple[str, str]]] = []
     for index, trade in enumerate(claimable_trades[:5], start=1):
-        rows.append([(f"🏷️ {index}. {truncate_middle(str(trade.market_id or ''), 8, 4)}", f"positions:claim:{trade.id}")])
+        rows.append([(f"🏷️ {index}. {truncate_middle(str(trade.market_id or ''), 8, 4)}", f"positions:redeem:{trade.id}")])
     if claimable_trades:
-        rows.append([("🎉 Claim All", "positions:claim_all")])
+        rows.append([("🎉 Redeem All", "positions:redeem_all")])
     rows.append([("✋ Auto-Claim Off" if auto_claim else "🤖 Auto-Claim On", "positions:auto_claim_off" if auto_claim else "positions:auto_claim_on")])
     rows.append([("⬅️ Back", "positions:refresh"), ("🔄 Refresh", "positions:claimable")])
     return keyboard(rows)
@@ -612,6 +613,7 @@ class TelegramPollingBot:
                 format_key_value("Risk Per Trade", f"{user.risk_percent}%"),
                 format_key_value("Max Trade Amount", f"${user.max_trade_amount}"),
                 format_key_value("Max Open Positions", user.max_open_positions),
+                format_key_value("Stop Loss", f"{float(user.stop_loss_percent or 10.0):.2f}%"),
                 format_key_value("Paper Testing", "ON" if user.paper_testing_active else "OFF"),
                 "",
                 "Choose a setting below and then send the new value in chat.",
@@ -632,6 +634,7 @@ class TelegramPollingBot:
                 format_key_value("Risk", f"{user.risk_percent}%"),
                 format_key_value("Max Trade", f"${user.max_trade_amount}"),
                 format_key_value("Max Open Positions", user.max_open_positions),
+                format_key_value("Stop Loss", f"{float(user.stop_loss_percent or 10.0):.2f}%"),
                 "",
                 "Account",
                 format_key_value("Signature Type", signature_type_label(account_config["signatureType"])),
@@ -864,16 +867,16 @@ class TelegramPollingBot:
 
     def build_claimable_message(self, claimable_trades: list[Trade]) -> str:
         if not claimable_trades:
-            return wrap_code_block(["Claim Center", "", "No settled winning trades are waiting to be claimed."])
+            return wrap_code_block(["Redeem Center", "", "No live redeemable winning trades are waiting to be redeemed."])
         total_size = sum(float(trade.size or 0) for trade in claimable_trades)
         lines = [
-            "Claim Center",
+            "Redeem Center",
             "",
             "Overview",
-            format_key_value("Claimable Markets", len(claimable_trades)),
-            format_key_value("Claimable Size", f"{total_size:.2f}"),
+            format_key_value("Redeemable Markets", len(claimable_trades)),
+            format_key_value("Redeemable Size", f"{total_size:.2f}"),
             "",
-            "Ready To Claim",
+            "Ready To Redeem",
         ]
         for index, trade in enumerate(claimable_trades[:5], start=1):
             lines.extend([f"{index}. {trade.market_id}", format_key_value("Side", trade.side), format_key_value("Size", trade.size), format_key_value("Entry", f"{float(trade.buy_price or 0):.4f}"), ""])
@@ -1186,7 +1189,7 @@ class TelegramPollingBot:
         claimable_trades = self.get_live_claimable_trades(user_id, user)
         trade = next((item for item in claimable_trades if int(item.id) == trade_id), None)
         if not trade:
-            raise ValueError("No live redeemable winning trade is waiting to be claimed for that selection.")
+            raise ValueError("No live redeemable winning trade is waiting to be redeemed for that selection.")
         if not trade.condition_id:
             raise ValueError("This trade is missing a condition id, so the bot cannot redeem it automatically.")
         poly = PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, resolve_user_polymarket_account_config(user))
@@ -1199,13 +1202,13 @@ class TelegramPollingBot:
     def claim_all_for_user(self, user_id: str, user: User) -> str:
         claimable_trades = self.get_live_claimable_trades(user_id, user)
         if not claimable_trades:
-            return "No live redeemable winning trades are waiting to be claimed."
+            return "No live redeemable winning trades are waiting to be redeemed."
         unique_conditions = {}
         for trade in claimable_trades:
             if trade.condition_id and trade.condition_id not in unique_conditions:
                 unique_conditions[trade.condition_id] = trade
         if not unique_conditions:
-            return "Claimable trades were found, but none have a usable condition id."
+            return "Redeemable trades were found, but none have a usable condition id."
         poly = PolyMarketAPI({"key": user.api_key or "", "secret": user.api_secret or "", "passphrase": user.api_passphrase or ""}, user.private_key, resolve_user_polymarket_account_config(user))
         receipts: list[str] = []
         failures: list[str] = []
@@ -1218,7 +1221,7 @@ class TelegramPollingBot:
                 receipts.append(f"{trade.market_id}: https://polygonscan.com/tx/{tx_hash}{self.format_platform_fee_note(fee_result)}")
             except Exception as exc:
                 failures.append(f"{trade.market_id}: {exc}")
-        return "\n".join((([f"Claims submitted: {len(receipts)}", *receipts] if receipts else []) + ([f"Failures: {len(failures)}", *failures] if failures else [])))
+        return "\n".join((([f"Redeems submitted: {len(receipts)}", *receipts] if receipts else []) + ([f"Failures: {len(failures)}", *failures] if failures else [])))
 
     def collect_platform_fee_for_trades(self, user_id: str, poly: PolyMarketAPI, trades: list[Trade]) -> dict[str, Any]:
         if not trades:
@@ -1313,7 +1316,7 @@ class TelegramPollingBot:
         self.ensure_authorized_user_profile(user_id)
         user = self.db.get_user(user_id) if user_id else None
         if command == "/help":
-            self.send_message(chat_id, "Clime Help\n\nUse /start as the main dashboard for portfolio, claims, balances, reports, and setup.\n\nSetup\n/import\n/approve\n/check_wallets\n/diag\n/fund_funder <amt>\n\nTrading Controls\n/start_trading\n/stop_trading\n/set_risk <%>\n/set_max <amt>\n/set_max_open <count>\n\nAccount\n/remove_wallet\n\nSupport\nFor any issues, contact @epsilon_dev1.")
+            self.send_message(chat_id, "Clime Help\n\nUse /start as the main dashboard for portfolio, redeems, balances, reports, and setup.\n\nSetup\n/import\n/approve\n/check_wallets\n/diag\n/fund_funder <amt>\n\nTrading Controls\n/start_trading\n/stop_trading\n/set_risk <%>\n/set_max <amt>\n/set_max_open <count>\n/set_stop_loss <%>\n\nRedeem\n/redeem <market_id>\n/redeem_all\n\nAccount\n/remove_wallet\n\nSupport\nFor any issues, contact @epsilon_dev1.")
             return
         if command == "/diag":
             self.send_message(chat_id, self.build_diagnostics_message(user_id, user))
@@ -1392,11 +1395,11 @@ class TelegramPollingBot:
                 self.send_message(chat_id, "Use /import first.")
             else:
                 claimable_trades = self.get_live_claimable_trades(user_id, user)
-                self.send_message(chat_id, "No live redeemable winning trades are waiting to be claimed." if not claimable_trades else self.build_claimable_message(claimable_trades), build_claimable_keyboard(claimable_trades, bool(user.auto_claim)) if claimable_trades else None)
+                self.send_message(chat_id, "No live redeemable winning trades are waiting to be redeemed." if not claimable_trades else self.build_claimable_message(claimable_trades), build_claimable_keyboard(claimable_trades, bool(user.auto_claim)) if claimable_trades else None)
             return
         for known_command, handler in {
             "/auto_claim_on": lambda: (self.db.update_auto_claim(user_id, True), self.send_message(chat_id, "Auto-claim enabled. Winning settled trades will be redeemed automatically when possible.")),
-            "/auto_claim_off": lambda: (self.db.update_auto_claim(user_id, False), self.send_message(chat_id, "Auto-claim disabled. Use /claimable, /claim, or /claim_all to redeem winners manually.")),
+            "/auto_claim_off": lambda: (self.db.update_auto_claim(user_id, False), self.send_message(chat_id, "Auto-redeem disabled. Use /claimable, /redeem, or /redeem_all to redeem winners manually.")),
             "/start_trading": lambda: self.send_message(chat_id, "Import a live wallet before enabling real auto-trading.") if (not user or not has_imported_wallet(user)) else (self.db.update_trading_status(user_id, True), self.send_message(chat_id, "Auto-trading enabled.")),
             "/stop_trading": lambda: (self.db.update_trading_status(user_id, False), self.send_message(chat_id, "Auto-trading disabled.")),
             "/remove_wallet": lambda: (self.db.clear_user_wallet(user_id), self.send_message(chat_id, "Live wallet credentials were removed. Your profile, settings, and paper-testing data were kept.")),
@@ -1426,6 +1429,13 @@ class TelegramPollingBot:
                     raise ValueError
                 self.db.update_max_open_positions(user_id, max_open)
                 self.send_message(chat_id, f"Maximum concurrent open positions set to {max_open}.")
+                return
+            if command == "/set_stop_loss":
+                stop_loss = float(arg)
+                if stop_loss <= 0 or stop_loss > 100:
+                    raise ValueError
+                self.db.update_stop_loss_percent(user_id, stop_loss)
+                self.send_message(chat_id, f"Auto-sell stop loss set to {stop_loss:.2f}% below entry.")
                 return
             if command == "/fund_funder":
                 if not user:
@@ -1470,7 +1480,7 @@ class TelegramPollingBot:
                     print(f"[BOT] Approve command failed for {user_id}: {error_msg}")
                     self.send_message(chat_id, f"❌ Approval failed: {error_msg[:400]}\n\nCheck your wallet setup with /check_wallets")
                 return
-            if command == "/claim":
+            if command in {"/claim", "/redeem"}:
                 if not user:
                     self.send_message(chat_id, "Use /import first.")
                     return
@@ -1480,16 +1490,16 @@ class TelegramPollingBot:
                     if str(trade.market_id or "") == str(arg)
                 ]
                 if not claimable:
-                    self.send_message(chat_id, "No live redeemable winning trade is waiting to be claimed for that market.")
+                    self.send_message(chat_id, "No live redeemable winning trade is waiting to be redeemed for that market.")
                     return
                 trade = claimable[0]
                 if not trade.condition_id:
                     self.send_message(chat_id, "This trade is missing a condition id, so the bot cannot redeem it automatically.")
                     return
                 claim_receipt = self.claim_trade_by_id_for_user(user_id, user, int(trade.id))
-                self.send_message(chat_id, f"Claim submitted: {claim_receipt}")
+                self.send_message(chat_id, f"Redeem submitted: {claim_receipt}")
                 return
-            if command == "/claim_all":
+            if command in {"/claim_all", "/redeem_all"}:
                 if not user:
                     self.send_message(chat_id, "Use /import first.")
                     return
@@ -1500,6 +1510,7 @@ class TelegramPollingBot:
                 "/set_risk": "Please provide a percentage from 1-100. Example: /set_risk 5",
                 "/set_max": "Please provide a valid amount. Example: /set_max 50",
                 "/set_max_open": "Please provide a whole number greater than 0. Example: /set_max_open 10",
+                "/set_stop_loss": "Please provide a percentage from 0-100. Example: /set_stop_loss 10",
             }
             self.send_message(chat_id, fallback.get(command, f"{command[1:]} failed: {exc}"))
 
@@ -1704,10 +1715,10 @@ class TelegramPollingBot:
                     pass
                 safe_answer(callback_query.get("id"), "Send funding amount.")
                 return
-            if action in {"risk_prompt", "max_prompt", "max_open_prompt"}:
-                step_map = {"risk_prompt": "awaiting_set_risk", "max_prompt": "awaiting_set_max", "max_open_prompt": "awaiting_set_max_open"}
-                prompt_map = {"risk_prompt": "Risk update opened. Send the new percentage.", "max_prompt": "Max trade update opened. Send the new amount.", "max_open_prompt": "Max open update opened. Send the new count."}
-                send_map = {"risk_prompt": "Send the new risk percentage from 1-100. Example: 5", "max_prompt": "Send the new max trade amount. Example: 50", "max_open_prompt": "Send the new maximum open positions count. Example: 10"}
+            if action in {"risk_prompt", "max_prompt", "max_open_prompt", "stop_loss_prompt"}:
+                step_map = {"risk_prompt": "awaiting_set_risk", "max_prompt": "awaiting_set_max", "max_open_prompt": "awaiting_set_max_open", "stop_loss_prompt": "awaiting_set_stop_loss"}
+                prompt_map = {"risk_prompt": "Risk update opened. Send the new percentage.", "max_prompt": "Max trade update opened. Send the new amount.", "max_open_prompt": "Max open update opened. Send the new count.", "stop_loss_prompt": "Stop-loss update opened. Send the drop percentage."}
+                send_map = {"risk_prompt": "Send the new risk percentage from 1-100. Example: 5", "max_prompt": "Send the new max trade amount. Example: 50", "max_open_prompt": "Send the new maximum open positions count. Example: 10", "stop_loss_prompt": "Send the auto-sell drop percentage. Example: 10"}
                 session["step"] = step_map[action]
                 view = self.render_dashboard_page(user_id, user, "risk_settings", prompt_map[action])
                 try:
@@ -1769,19 +1780,20 @@ class TelegramPollingBot:
                 self.edit_message_text(chat_id, message_id, view["text"], view["keyboard"])
                 self.answer_callback(callback_query["id"], "Wallet removed.")
                 return
-            if action == "claim_all":
+            if action in {"claim_all", "redeem_all"}:
                 result = self.claim_all_for_user(user_id, user)
                 updated_user = self.db.get_user(user_id)
                 view = self.render_dashboard_page(user_id, updated_user, "claimable", result)
                 self.edit_message_text(chat_id, message_id, view["text"], view["keyboard"])
-                self.answer_callback(callback_query["id"], "Claim all processed.")
+                self.answer_callback(callback_query["id"], "Redeem all processed.")
                 return
-            if action.startswith("claim:"):
-                tx_hash = self.claim_trade_by_id_for_user(user_id, user, int(action.split("claim:", 1)[1]))
+            if action.startswith("claim:") or action.startswith("redeem:"):
+                trade_id = int(action.split(":", 1)[1])
+                tx_hash = self.claim_trade_by_id_for_user(user_id, user, trade_id)
                 updated_user = self.db.get_user(user_id)
-                view = self.render_dashboard_page(user_id, updated_user, "claimable", f"Claim submitted: https://polygonscan.com/tx/{tx_hash}")
+                view = self.render_dashboard_page(user_id, updated_user, "claimable", f"Redeem submitted: https://polygonscan.com/tx/{tx_hash}")
                 self.edit_message_text(chat_id, message_id, view["text"], view["keyboard"])
-                self.answer_callback(callback_query["id"], "Claim submitted.")
+                self.answer_callback(callback_query["id"], "Redeem submitted.")
                 return
             self.answer_callback(callback_query["id"], "Unknown action.")
         except Exception as exc:
@@ -1905,6 +1917,17 @@ class TelegramPollingBot:
                 session["step"] = ""
             except Exception:
                 self.send_message(chat_id, "Send a whole number greater than 0. Example: 10")
+            return
+        if step == "awaiting_set_stop_loss":
+            try:
+                stop_loss = float(text)
+                if stop_loss <= 0 or stop_loss > 100:
+                    raise ValueError
+                self.db.update_stop_loss_percent(user_id, stop_loss)
+                self.send_message(chat_id, f"Auto-sell stop loss set to {stop_loss:.2f}% below entry.")
+                session["step"] = ""
+            except Exception:
+                self.send_message(chat_id, "Send a percentage greater than 0 and at most 100. Example: 10")
 
     def handle_update(self, update: dict[str, Any]):
         if update.get("callback_query"):
